@@ -2,11 +2,17 @@
 
 A small Android app: paste a link, press **Go**, and watch the progress.
 Downloads are saved to a folder called **SpotDL Downloader** in your phone's
-internal storage, organised as `<Artist>/<Album>/<Track>`.
+internal storage, organised as `<Artist>/<Album>/<Song title>`.
 
-Accepted links: YouTube or YouTube Music (video, playlist, album, artist),
-and Spotify (track, album, playlist). You can also type an artist name to
-download their albums and singles.
+Accepted links: YouTube or YouTube Music (song, video, playlist, album, artist
+or channel in any address style, including `@name`), and Spotify (track, album,
+playlist, artist). You can also type an artist name to download their albums
+and singles.
+
+- A normal YouTube video of a song is matched to the same song on YouTube Music
+  (by title, artist and length) and the audio comes from YouTube Music.
+- Artist links download the artist's albums and singles from YouTube Music. For
+  a Spotify artist link the artist's name is read from Spotify first.
 
 On first launch Android asks for permission. Allow **All files access** so
 the app can create the `SpotDL Downloader` folder.
@@ -38,7 +44,7 @@ pure-Python libraries instead:
 Formats: `mp3` (converted on the phone, tagged with cover art), `m4a`
 (AAC, tagged with cover art) or `opus` (saved as `.webm`, untagged).
 
-**Auto-update:** each time the app starts it downloads the newest yt-dlp and
+**Auto-update:** each time a download starts the app fetches the newest yt-dlp and
 ytmusicapi from PyPI (both are pure Python), so YouTube changes don't break it.
 If the phone is offline it uses the last version it downloaded.
 
@@ -56,6 +62,8 @@ instead. The path is shown on screen.
 
 - `main.py`: Kivy user interface
 - `spotdl_bridge.py`: search, download, MP3 conversion and tagging logic
+- `service.py`: runs the download in the background and reports progress
+- `report.py`: writes the PDF report
 - `updater.py`: downloads the latest yt-dlp / ytmusicapi on startup
 - `buildozer.spec`: Android build configuration
 - `.github/workflows/build.yml`: GitHub Actions workflow that builds the APK
@@ -71,3 +79,32 @@ instead. The path is shown on screen.
 Only YouTube Music audio tracks are ever downloaded, never video. Pasting a
 music-video link downloads its YouTube Music audio version; if there isn't one,
 the song is reported as unavailable instead.
+
+## Background downloads
+
+Downloads run in an Android foreground service, so you can press Go and then
+leave the app, switch to another one, or lock the screen. A notification shows
+while it works, and another one appears when it finishes. The app screen only
+shows progress; reopening it picks up the live progress again. Press **Cancel**
+in the app to stop.
+
+## Track order
+
+File names are just the song title. The track number (e.g. 3 of 12), album,
+album artist and cover are stored inside each file's tags, so music players
+keep the album in its real order even if you rename the files.
+
+## Big playlists and retrying failures
+
+- There is no limit on the number of songs. Spotify's public page only lists the
+  first 100 songs of a playlist, so the app reads the full listing from Spotify
+  in pages of 100. If Spotify refuses, the log says so and only the first 100
+  are downloaded.
+- Songs are found and downloaded one after another, so downloading starts
+  immediately even for a playlist of thousands. The screen shows the songs
+  around the current one, with overall counts for the whole job.
+- Finished songs are remembered (hidden file `.spotdl_done.txt` in
+  `SpotDL Downloader`), so pressing Go again on the same link, for example after
+  a cancel or a phone restart, skips everything already downloaded.
+- When a job ends with failed songs, a **Retry N failed** button appears. It
+  downloads only those songs again and writes a second PDF report.

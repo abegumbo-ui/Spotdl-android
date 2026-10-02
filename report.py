@@ -185,12 +185,17 @@ def build_report(path, title, link, audio_format, results, missing,
              f'unavailable', 12, bold=True, gap=6)
     pdf.space(4)
 
+    def pos(t):
+        return t.get('position') or t.get('track_number') or 0
+
     def section(heading, color, rows):
+        """rows: [(position, line, note)] shown in album order."""
         if not rows:
             return
         pdf.text(f'{heading} ({len(rows)})', 13, bold=True, color=color, gap=6)
-        for n, (line, note) in enumerate(rows, 1):
-            pdf.text(f'{n}. {line}', 10, indent=8)
+        for position, line, note in sorted(rows, key=lambda r: r[0] or 9999):
+            label = f'Track {position}:  ' if position else ''
+            pdf.text(f'{label}{line}', 10, indent=8)
             if note:
                 pdf.text(note, 9, color=color, indent=22)
         pdf.space(8)
@@ -200,13 +205,13 @@ def build_report(path, title, link, audio_format, results, missing,
         return f"{t['title']} - {t['artist']}{extra}"
 
     section('Failed / not downloaded', RED,
-            [(name(r['track']), 'Reason: ' + (r['note'] or 'unknown'))
-             for r in failed] +
-            [(f"{m['title']} - {m['artist']}", 'Reason: ' + m['reason'])
-             for m in missing])
+            [(pos(r['track']), name(r['track']),
+              'Reason: ' + (r['note'] or 'unknown')) for r in failed] +
+            [(m.get('position'), f"{m['title']} - {m['artist']}",
+              'Reason: ' + m['reason']) for m in missing])
     section('Downloaded', GREEN,
-            [(name(r['track']), r['note'] and 'Note: ' + r['note'])
-             for r in done])
+            [(pos(r['track']), name(r['track']),
+              r['note'] and 'Note: ' + r['note']) for r in done])
     section('Already in the folder (skipped)', GREY,
-            [(name(r['track']), '') for r in skipped])
+            [(pos(r['track']), name(r['track']), '') for r in skipped])
     pdf.save(path)
