@@ -27,6 +27,8 @@ except NameError:
     pass
 
 LOG_LINES = 300
+WINDOW = 40               # songs shown at a time (a playlist can have 10,000)
+MAX_FAILED_SHOWN = 300
 STALE_AFTER = 20          # seconds without a heartbeat = service is gone
 
 
@@ -39,6 +41,7 @@ def paths(state_dir):
         'state': os.path.join(state_dir, 'state.json'),
         'cover': os.path.join(state_dir, 'now_cover.bin'),
         'cancel': os.path.join(state_dir, 'cancel'),
+        'failed': os.path.join(state_dir, 'failed.json'),
     }
 
 
@@ -59,10 +62,13 @@ class FileUI:
         self.dirty = True
         self.seq = 0
         self._stop = False
+        self.failed_path = self.p['failed']
+        self.queue = []              # every song: {'a', 't', 's', 'n'}
+        self.active = 0
         self.s = {'job': job_id, 'running': True, 'status': 'Starting...',
-                  'progress': 0.0, 'done': 0, 'total': 0, 'queue': [],
+                  'progress': 0.0, 'done': 0, 'total': 0,
                   'now': None, 'log': [], 'report': '', 'cover_ver': 0,
-                  'finished': False}
+                  'finished': False, 'can_retry': False}
         self._writer = threading.Thread(target=self._loop, daemon=True)
         self._writer.start()
 
@@ -80,10 +86,30 @@ class FileUI:
             self.dirty = False
             self.seq += 1
             snap = dict(self.s, seq=self.seq, updated=time.time())
+            snap.update(self._queue_view())
             try:
                 _atomic_write(self.p['state'], json.dumps(snap))
             except OSError:
                 self.dirty = True
+
+    def _queue_view(self):
+        """Counts for the whole job plus just the songs worth showing: the
+        ones around the current song, or the failed ones once it is over."""
+        counts = {'done': 0, 'skipped': 0, 'failed': 0, 'pending': 0,
+                  'active': 0}
+        for q in self.queue:
+            counts[q['s']] = counts.get(q['s'], 0) + 1
+        if self.s['finished'] and counts['failed']:
+            idx = [i for i, q in enumerate(self.queue) if q['s'] == 'failed']
+            idx = idx[:MAX_FAILED_SHOWN]
+            title = 'failed'
+        else:
+            start = max(0, min(self.active, len(self.queue)) - 2)
+            idx = list(range(start, min(len(self.queue), start + WINDOW)))
+            title = 'window'
+        rows = [dict(self.queue[i], i=i) for i in idx]
+        return {'counts': counts, 'queue_len': len(self.queue),
+                'win': {'kind': title, 'rows': rows}}
 
     def close(self):
         self._stop = True
@@ -116,13 +142,18 @@ class FileUI:
         self._set(done=done, total=total, progress=0.0)
 
     def set_queue(self, tracks):
-        self._set(queue=[{'a': t['artist'], 't': t['title'], 's': 'pending',
-                          'n': ''} for t in tracks])
+        with self.lock:
+            self.queue = [{'a': t['artist'], 't': t['title'], 's': 'pending',
+                           'n': ''} for t in tracks]
+            self.active = 0
+            self.dirty = True
 
     def set_track_state(self, index, state, note=''):
         with self.lock:
-            if index < len(self.s['queue']):
-                self.s['queue'][index].update(s=state, n=note)
+            if index < len(self.queue):
+                self.queue[index].update(s=state, n=note)
+                if state == 'active':
+                    self.active = index
                 self.dirty = True
 
     def set_now(self, track, cover_bytes):
@@ -225,7 +256,15 @@ def run_job(job_path):
             ui.set_status('Checking for updates...')
             updater.check_and_update(base, ui.log)
             import spotdl_bridge
-            spotdl_bridge.download(job['link'], job['output'], job['format'], ui)
+            retry = bool(job.get('retry'))
+            if not retry:        # a normal job starts with a clean failed list
+                try:
+                    os.remove(ui.failed_path)
+                except OSError:
+                    pass
+            spotdl_bridge.download(job.get('link', ''), job['output'],
+                                   job['format'], ui,
+                                   retry_path=ui.failed_path if retry else None)
     except Exception as e:
         ui.log(f'Error: {e}', 'error')
         ui.log(traceback.format_exc(), 'error')
@@ -233,7 +272,9 @@ def run_job(job_path):
     finally:
         with ui.lock:
             status = ui.s['status']
-        ui._set(running=False, finished=True)
+        ui._set(running=False, finished=True,
+                can_retry=os.path.exists(ui.failed_path)
+                and not ui.cancel_requested)
         ui.close()
         notify('SpotDL Downloader', status)
 

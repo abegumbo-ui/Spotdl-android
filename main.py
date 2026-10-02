@@ -120,6 +120,7 @@ class SpotDLLayout(BoxLayout):
         self.queue_rows = []        # [(label, track)]
         self._done = 0
         self._total = 0
+        self._failed = 0
         self._frac = 0.0
         self._build_ui()
 
@@ -152,6 +153,14 @@ class SpotDLLayout(BoxLayout):
         row.add_widget(self.format_spinner)
         row.add_widget(self.go_btn)
         self.add_widget(row)
+
+        # Appears when a job finished with failed songs
+        self.retry_btn = Button(
+            text='', bold=True, font_size=sp(15), size_hint_y=None,
+            height=0, opacity=0, disabled=True, background_normal='',
+            background_color=(0.9, 0.55, 0.1, 1), color=(0, 0, 0, 1))
+        self.retry_btn.bind(on_press=self.on_retry)
+        self.add_widget(self.retry_btn)
 
         self.path_label = _text_label('', 11, (0.5, 0.5, 0.5, 1), 30)
         self.add_widget(self.path_label)
@@ -267,8 +276,10 @@ class SpotDLLayout(BoxLayout):
             self.overall_bar.value = 0
             return
         self.overall_bar.value = min(1.0, (self._done + self._frac) / total)
-        self.overall_label.text = (f'{self._done} of {total} done  -  '
-                                   f'{total - self._done} left')
+        text = f'{self._done} of {total} finished  -  {total - self._done} left'
+        if self._failed:
+            text += f'  -  {self._failed} failed'
+        self.overall_label.text = text
 
     def set_queue(self, tracks):
         def apply(dt):
@@ -295,7 +306,7 @@ class SpotDLLayout(BoxLayout):
         row, state_lbl, name_lbl, t = self.queue_rows[i]
         word, colour = STATES[state]
         state_lbl.text = f'[color={colour}]{word}[/color]'
-        text = escape_markup(f"{i + 1}. {t['artist']} - {t['title']}")
+        text = escape_markup(f"{t.get('i', i) + 1}. {t['artist']} - {t['title']}")
         if note:
             text += f'\n[color={colour}]{escape_markup(note)}[/color]'
             name_lbl.shorten = False
@@ -393,21 +404,41 @@ class SpotDLLayout(BoxLayout):
 
     def _apply(self, st):
         seen = self._seen
-        queue = st.get('queue') or []
-        sig = (st.get('job'), len(queue))
+        win = st.get('win') or {'kind': 'window', 'rows': []}
+        rows_in = win['rows']
+        sig = (st.get('job'), win['kind'], tuple(r['i'] for r in rows_in))
         if sig != seen.get('queue_sig'):
             seen['queue_sig'] = sig
             seen['rows'] = {}
-            self.set_queue([{'artist': q['a'], 'title': q['t']} for q in queue])
+            self.queue_tab.text = ('Failed songs' if win['kind'] == 'failed'
+                                   else 'Songs')
+            self.set_queue([{'artist': r['a'], 'title': r['t'], 'i': r['i']}
+                            for r in rows_in])
         rows = seen.setdefault('rows', {})
-        for i, q in enumerate(queue):
+        for k, q in enumerate(rows_in):
             key = (q['s'], q['n'])
-            if rows.get(i) != key:
-                rows[i] = key
-                self.set_track_state(i, q['s'], q['n'])
+            if rows.get(k) != key:
+                rows[k] = key
+                self.set_track_state(k, q['s'], q['n'])
+        counts = st.get('counts') or {}
+        failed = counts.get('failed', 0)
+        if failed != self._failed:
+            self._failed = failed
+            self._refresh_overall()
+        retry_ok = bool(st.get('can_retry')) and not self.running
+        retry_key = (retry_ok, failed)
+        if retry_key != seen.get('retry'):
+            seen['retry'] = retry_key
+            self.retry_btn.text = (f'Retry {failed} failed song'
+                                   f'{"" if failed == 1 else "s"}')
+            self.retry_btn.height = dp(44) if retry_ok else 0
+            self.retry_btn.opacity = 1 if retry_ok else 0
+            self.retry_btn.disabled = not retry_ok
         if (st['done'], st['total']) != seen.get('overall'):
             seen['overall'] = (st['done'], st['total'])
             self.set_overall(st['done'], st['total'])
+        if self.running is False and st.get('finished') and failed:
+            self._failed = failed
         if st['progress'] != seen.get('progress'):
             seen['progress'] = st['progress']
             self.set_progress(st['progress'])
@@ -454,6 +485,14 @@ class SpotDLLayout(BoxLayout):
         if not link:
             self.set_status('Paste a link first.')
             return
+        self._begin_job({'link': link})
+
+    def on_retry(self, *args):
+        """Download again only the songs that failed in the last job."""
+        if not self.running and os.path.exists(self.p['failed']):
+            self._begin_job({'retry': True})
+
+    def _begin_job(self, extra):
         self.prepare_folder()
         # Clear the screen for the new job
         self.track_bar.value = 0
@@ -465,23 +504,24 @@ class SpotDLLayout(BoxLayout):
         for w in (self.now_title, self.now_artist, self.now_album):
             w.text = ''
         self.cover.texture = None
-        self._done = self._total = 0
+        self._done = self._total = self._failed = 0
+        self.retry_btn.height, self.retry_btn.opacity = 0, 0
+        self.retry_btn.disabled = True
         self.log_lines.clear()
         self.log_label.text = ''
         self._seen = {}
         # Hand the job to the background service
-        job = {'id': time.time(), 'link': link, 'output': self.output_path,
-               'format': self.format_spinner.text,
-               'data_dir': App.get_running_app().user_data_dir}
-        for stale in ('cancel',):
-            try:
-                os.remove(self.p[stale])
-            except OSError:
-                pass
+        job = dict({'id': time.time(), 'output': self.output_path,
+                    'format': self.format_spinner.text,
+                    'data_dir': App.get_running_app().user_data_dir}, **extra)
+        try:
+            os.remove(self.p['cancel'])
+        except OSError:
+            pass
         with open(self.p['job'], 'w') as f:
             json.dump(job, f)
         self._st = {'job': job['id'], 'running': True, 'status': 'Starting...',
-                    'progress': 0.0, 'done': 0, 'total': 0, 'queue': [],
+                    'progress': 0.0, 'done': 0, 'total': 0, 'win': None,
                     'now': None, 'log': [], 'report': '', 'seq': -1,
                     'updated': time.time()}
         self._mtime = None

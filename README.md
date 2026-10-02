@@ -56,6 +56,8 @@ instead. The path is shown on screen.
 
 - `main.py`: Kivy user interface
 - `spotdl_bridge.py`: search, download, MP3 conversion and tagging logic
+- `service.py`: runs the download in the background and reports progress
+- `report.py`: writes the PDF report
 - `updater.py`: downloads the latest yt-dlp / ytmusicapi on startup
 - `buildozer.spec`: Android build configuration
 - `.github/workflows/build.yml`: GitHub Actions workflow that builds the APK
@@ -85,3 +87,18 @@ in the app to stop.
 File names are just the song title. The track number (e.g. 3 of 12), album,
 album artist and cover are stored inside each file's tags, so music players
 keep the album in its real order even if you rename the files.
+
+## Big playlists and retrying failures
+
+- There is no limit on the number of songs. Spotify's public page only lists the
+  first 100 songs of a playlist, so the app reads the full listing from Spotify
+  in pages of 100. If Spotify refuses, the log says so and only the first 100
+  are downloaded.
+- Songs are found and downloaded one after another, so downloading starts
+  immediately even for a playlist of thousands. The screen shows the songs
+  around the current one, with overall counts for the whole job.
+- Finished songs are remembered (hidden file `.spotdl_done.txt` in
+  `SpotDL Downloader`), so pressing Go again on the same link, for example after
+  a cancel or a phone restart, skips everything already downloaded.
+- When a job ends with failed songs, a **Retry N failed** button appears. It
+  downloads only those songs again and writes a second PDF report.
