@@ -3,26 +3,29 @@ title = SpotDL
 package.name = spotdl
 package.domain = com.spotdlapp
 
-source.dir = app
-source.include_exts = py,png,jpg,kv,atlas
+# App sources live at the repository root.
+source.dir = .
+source.include_exts = py,png,jpg,kv,atlas,ttf
+source.exclude_dirs = .github, .buildozer, bin, tests
 
 version = 1.0
 
-requirements = python3,kivy==2.3.0,spotdl,yt-dlp,mutagen,pillow,requests,cryptography,charset-normalizer,certifi,urllib3,idna,spotipy,ytmusicapi,syncedlyrics,beautifulsoup4,lxml
+# Only pure-Python libraries (plus p4a recipes) so the build works on Android.
+requirements = python3,kivy,pyjnius,android,openssl,sqlite3,certifi,requests,urllib3,idna,charset-normalizer,yt-dlp,ytmusicapi,mutagen
 
 orientation = portrait
 fullscreen = 0
 
-android.permissions = INTERNET, WRITE_EXTERNAL_STORAGE, READ_EXTERNAL_STORAGE, MANAGE_EXTERNAL_STORAGE
-android.api = 33
-android.minapi = 26
-android.ndk = 25b
-android.sdk = 33
+android.permissions = INTERNET, WRITE_EXTERNAL_STORAGE, READ_EXTERNAL_STORAGE, READ_MEDIA_AUDIO
+android.api = 34
+android.minapi = 24
 android.accept_sdk_license = True
-android.arch = arm64-v8a
+android.archs = arm64-v8a, armeabi-v7a
+android.allow_backup = True
 
-android.gradle_dependencies = 'androidx.appcompat:appcompat:1.6.1'
+# Use the latest stable python-for-android release.
+p4a.branch = master
 
 [buildozer]
 log_level = 2
-warn_on_root = 1
+warn_on_root = 0

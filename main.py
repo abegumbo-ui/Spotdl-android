@@ -10,12 +10,12 @@ from kivy.uix.scrollview import ScrollView
 from kivy.uix.spinner import Spinner
 from kivy.clock import Clock
 from kivy.core.window import Window
-from kivy.graphics import Color, Rectangle
+from kivy.utils import platform, escape_markup
 
 import threading
 import os
-from android.storage import primary_external_storage_path  # type: ignore
-from android.permissions import request_permissions, Permission  # type: ignore
+
+MAX_LOG_LINES = 300
 
 Window.clearcolor = (0.05, 0.05, 0.05, 1)
 
@@ -58,15 +58,15 @@ class SpotDLLayout(BoxLayout):
         fmt_label = Label(text='Format:', size_hint_x=None, width=70,
                           color=(0.6, 0.6, 0.6, 1), font_size='13sp')
         self.format_spinner = Spinner(
-            text='mp3',
-            values=['mp3', 'm4a', 'flac', 'opus', 'ogg'],
+            text='m4a',
+            values=['m4a', 'opus'],
             size_hint_x=0.3,
             background_color=(0.11, 0.73, 0.33, 1),
             color=(0, 0, 0, 1),
             font_size='13sp'
         )
         self.download_btn = Button(
-            text='⬇  Download Artist',
+            text='Download Artist',
             background_color=(0.11, 0.73, 0.33, 1),
             color=(0, 0, 0, 1),
             bold=True, font_size='14sp'
@@ -119,7 +119,8 @@ class SpotDLLayout(BoxLayout):
             'warning': 'FF9800',
         }
         c = color_map.get(kind, 'cccccc')
-        self.log_lines.append(f'[color={c}]{msg}[/color]')
+        self.log_lines.append(f'[color={c}]{escape_markup(msg)}[/color]')
+        del self.log_lines[:-MAX_LOG_LINES]
         Clock.schedule_once(self._refresh_log)
 
     def _refresh_log(self, *args):
@@ -134,7 +135,7 @@ class SpotDLLayout(BoxLayout):
             return
 
         self.download_btn.disabled = True
-        self.download_btn.text = '⏳ Downloading...'
+        self.download_btn.text = 'Downloading...'
         self.log_lines.clear()
         self.log(f'Starting: {artist}', 'info')
 
@@ -149,13 +150,31 @@ class SpotDLLayout(BoxLayout):
         ).start()
 
     def _get_output_path(self):
-        try:
-            base = primary_external_storage_path()
-        except Exception:
-            base = '/sdcard'
-        path = os.path.join(base, 'Music', 'SpotDL')
-        os.makedirs(path, exist_ok=True)
-        return path
+        candidates = []
+        if platform == 'android':
+            try:
+                from android.storage import primary_external_storage_path
+                candidates.append(os.path.join(
+                    primary_external_storage_path(), 'Music', 'SpotDL'))
+            except Exception:
+                candidates.append('/sdcard/Music/SpotDL')
+        else:
+            candidates.append(os.path.join(
+                os.path.expanduser('~'), 'Music', 'SpotDL'))
+        # App-private fallback that is always writable.
+        candidates.append(os.path.join(App.get_running_app().user_data_dir,
+                                       'SpotDL'))
+        for path in candidates:
+            try:
+                os.makedirs(path, exist_ok=True)
+                probe = os.path.join(path, '.write_test')
+                with open(probe, 'w') as f:
+                    f.write('ok')
+                os.remove(probe)
+                return path
+            except Exception:
+                continue
+        return candidates[-1]
 
     def _run_download(self, artist, output_path, fmt):
         try:
@@ -168,7 +187,7 @@ class SpotDLLayout(BoxLayout):
 
     def _done(self, *args):
         self.download_btn.disabled = False
-        self.download_btn.text = '⬇  Download Artist'
+        self.download_btn.text = 'Download Artist'
 
 
 class SpotDLApp(App):
