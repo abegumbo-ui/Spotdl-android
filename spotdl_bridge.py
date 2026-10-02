@@ -14,6 +14,7 @@ The `ui` object provides (all safe to call from this thread):
   set_queue(tracks)  set_track_state(index, state, note)
   set_now(track, cover_bytes)  set_report(path)  cancel_requested
 """
+import glob
 import json
 import os
 import re
@@ -31,6 +32,10 @@ FORMATS = {
 MP3_BITRATE = 192000
 DURATION_TOLERANCE = 1.5  # seconds; Spotify/YouTube round differently, but a
 #                           2s gap means a genuinely different cut
+# Each song gets three tries. Every try asks YouTube Music for a fresh download
+# address (the old one may have expired or been refused with 403 Forbidden);
+# the second try uses a different player route than the first and third.
+ATTEMPT_PLANS = [None, ['android_vr'], None]
 AUDIO_TRACK = 'MUSIC_VIDEO_TYPE_ATV'  # YouTube Music's "song" (audio) type
 
 _BAD_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
@@ -420,14 +425,14 @@ def spotify_items(url, log):
     shared_cover = _best_image(entity) if kind in ('album', 'track') else None
     rows = [entity] if kind == 'track' else (entity.get('trackList') or [])
     out = []
-    for row in rows:
+    for position, row in enumerate(rows, 1):
         name = row.get('title') or row.get('name')
         artist = row.get('subtitle') or ', '.join(
             a.get('name', '') for a in row.get('artists', []) or [])
         ms = row.get('duration')
         if name:
             out.append({
-                'title': name, 'artist': artist,
+                'position': position, 'title': name, 'artist': artist,
                 'album': title if kind == 'album' else '',
                 'duration': ms / 1000 if isinstance(ms, (int, float)) else None,
                 'cover': (_best_image(row) if kind == 'playlist' else None)
@@ -457,10 +462,15 @@ def match_spotify_items(yt, items, ui):
         if off is not None and off > DURATION_TOLERANCE:
             ui.log(f"  ! closest version of {it['title']} is {off:.0f}s off",
                    'warning')
-        tracks.append(_song_to_track(
+        track = _song_to_track(
             yt, r, {'title': it['title'], 'artist': it['artist'],
                     'album': it['album']},
-            cover=it.get('cover'), duration=it.get('duration')))
+            cover=it.get('cover'), duration=it.get('duration'))
+        track['position'] = it.get('position')
+        if it['album']:       # an album: keep its real track order and numbers
+            track['track_number'] = it['position']
+            track['track_total'] = len(items)
+        tracks.append(track)
     return tracks, missing
 
 
@@ -716,27 +726,67 @@ def download_tracks(tracks, missing, output_path, audio_format, ui):
             elif d.get('status') == 'finished':
                 ui.set_progress(1)
 
-        opts = {
-            'format': selector,
-            'outtmpl': os.path.join(folder, base + '.%(ext)s'),
-            'quiet': True, 'no_warnings': True, 'noprogress': True,
-            'noplaylist': True, 'retries': 3,
-            'logger': _QuietLogger(), 'progress_hooks': [hook],
-        }
-        try:
+        def fetch(plan):
+            """One download attempt. `plan` picks the YouTube player route."""
+            opts = {
+                'format': selector,
+                'outtmpl': os.path.join(folder, base + '.%(ext)s'),
+                'quiet': True, 'no_warnings': True, 'noprogress': True,
+                'noplaylist': True, 'retries': 3,
+                'logger': _QuietLogger(), 'progress_hooks': [hook],
+            }
+            if plan:
+                opts['extractor_args'] = {'youtube': {'player_client': plan}}
             with yt_dlp.YoutubeDL(opts) as ydl:
                 # YouTube Music address of the audio track; audio-only format.
                 info = ydl.extract_info(
                     f"https://music.youtube.com/watch?v={t['video_id']}",
                     download=True)
-                saved = ydl.prepare_filename(info)
+                return info, ydl.prepare_filename(info)
+
+        try:
+            info = saved = None
+            attempts = 0
+            for attempt, plan in enumerate(ATTEMPT_PLANS, 1):
+                attempts = attempt
+                try:
+                    info, saved = fetch(plan)
+                    break
+                except Cancelled:
+                    raise
+                except Exception as e:
+                    reason = _clean_error(e)
+                    if attempt == len(ATTEMPT_PLANS):
+                        raise RuntimeError(
+                            f'{reason} (failed after {attempt} attempts)')
+                    ui.log(f'  ! attempt {attempt} of {len(ATTEMPT_PLANS)} '
+                           f'failed: {reason} - retrying', 'warning')
+                    ui.set_track_state(
+                        i, 'active', f'retry {attempt + 1} of '
+                        f'{len(ATTEMPT_PLANS)}: {reason}')
+                    ui.set_progress(0)
+                    # Leftover partial files belong to the old download link.
+                    for old in glob.glob(
+                            os.path.join(glob.escape(folder),
+                                         glob.escape(base) + '.*')):
+                        if old != final:
+                            try:
+                                os.remove(old)
+                            except OSError:
+                                pass
+                    for _ in range(attempt * 4):      # wait 4s, then 8s
+                        _check_cancel(ui)
+                        time.sleep(0.5)
             note = ''
+            if attempts > 1:
+                note = f'succeeded on attempt {attempts}'
             got = info.get('duration')
             # A second or two either way is normal (Spotify and YouTube trim
             # silence differently) and is not worth mentioning.
             if t.get('duration') and got and abs(got - t['duration']) > 5:
-                note = (f"length {got:.0f}s vs expected "
-                        f"{t['duration']:.0f}s (different version)")
+                note = (note + '; ' if note else '') + (
+                    f"length {got:.0f}s vs expected "
+                    f"{t['duration']:.0f}s (different version)")
                 ui.log(f'  ! {note}', 'warning')
             if ext == 'mp3':
                 ui.set_status(f'Converting {n}/{total} to MP3: {label}')
