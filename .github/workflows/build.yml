@@ -6,6 +6,11 @@ on:
     tags: [ 'v*' ]          # pushing a tag such as v1.1 publishes a Release
   pull_request:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Publish a GitHub Release with this tag, e.g. v1.1 (leave empty to only build)'
+        required: false
+        default: ''
 
 permissions:
   contents: write           # needed to create the GitHub Release
@@ -71,13 +76,16 @@ jobs:
           retention-days: 7
 
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        # Runs when a v* tag is pushed, or when this workflow is started by
+        # hand with a release tag filled in.
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
-          cp bin/*.apk "SpotDL-Downloader-${GITHUB_REF_NAME}.apk"
-          gh release create "$GITHUB_REF_NAME" \
-            "SpotDL-Downloader-${GITHUB_REF_NAME}.apk" \
-            --title "SpotDL Downloader ${GITHUB_REF_NAME}" \
+          cp bin/*.apk "SpotDL-Downloader-${TAG}.apk"
+          gh release create "$TAG" \
+            "SpotDL-Downloader-${TAG}.apk" \
+            --title "SpotDL Downloader ${TAG}" \
             --notes-file RELEASE_NOTES.md \
-            --verify-tag --latest
+            --target "$GITHUB_SHA" --latest
