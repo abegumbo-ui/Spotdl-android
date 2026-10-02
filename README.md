@@ -1,0 +1,73 @@
+# SpotDL Android
+
+A small Android app: paste a link, press **Go**, and watch the progress.
+Downloads are saved to a folder called **SpotDL Downloader** in your phone's
+internal storage, organised as `<Artist>/<Album>/<Track>`.
+
+Accepted links: YouTube or YouTube Music (video, playlist, album, artist),
+and Spotify (track, album, playlist). You can also type an artist name to
+download their albums and singles.
+
+On first launch Android asks for permission. Allow **All files access** so
+the app can create the `SpotDL Downloader` folder.
+
+## Getting the APK (no Android Studio needed)
+
+GitHub builds the APK automatically on every push.
+
+1. Open the **Actions** tab of this repository.
+2. Click the latest **Build SpotDL APK** run with a green check mark.
+3. Scroll down to **Artifacts** and download **SpotDL-APK** (a zip file).
+4. Unzip it on your phone and open the `.apk` file. Allow "install from
+   unknown sources" if Android asks.
+
+To start a build by hand: **Actions → Build SpotDL APK → Run workflow**.
+
+If a build fails, download the **build-log** artifact from that run to see why.
+
+## How it works
+
+The original `spotdl` package can't run on Android (it needs ffmpeg and
+compiled libraries that python-for-android can't build), so the app uses
+pure-Python libraries instead:
+
+- **ytmusicapi**: finds the artist and lists their albums and singles
+- **yt-dlp**: downloads the audio
+- **mutagen**: writes title, artist, album, track number and cover art
+
+Formats: `mp3` (converted on the phone, tagged with cover art), `m4a`
+(AAC, tagged with cover art) or `opus` (saved as `.webm`, untagged).
+
+**Auto-update:** each time the app starts it downloads the newest yt-dlp and
+ytmusicapi from PyPI (both are pure Python), so YouTube changes don't break it.
+If the phone is offline it uses the last version it downloaded.
+
+**Right version of a song:** Spotify links carry the track length. The app
+picks the YouTube Music version whose length matches, instead of the first
+search result, and uses the album's square cover art.
+
+The APK is built for 64-bit phones (arm64-v8a), which is nearly every phone
+made since 2017.
+
+If the permission isn't granted, files go to the app's private storage
+instead. The path is shown on screen.
+
+## Files
+
+- `main.py`: Kivy user interface
+- `spotdl_bridge.py`: search, download, MP3 conversion and tagging logic
+- `updater.py`: downloads the latest yt-dlp / ytmusicapi on startup
+- `buildozer.spec`: Android build configuration
+- `.github/workflows/build.yml`: GitHub Actions workflow that builds the APK
+
+## What you see while it runs
+
+- The album art and details of the song being downloaded
+- An overall bar with "X of Y done - Z left", and a list of every song with
+  its status (waiting / downloading / done / FAILED with the reason)
+- When a link has more than one song, a PDF report is saved to
+  `SpotDL Downloader/Reports/` listing what downloaded and what failed
+
+Only YouTube Music audio tracks are ever downloaded, never video. Pasting a
+music-video link downloads its YouTube Music audio version; if there isn't one,
+the song is reported as unavailable instead.
