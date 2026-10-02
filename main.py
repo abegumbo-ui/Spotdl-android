@@ -131,7 +131,7 @@ class SpotDLLayout(BoxLayout):
             (1, 1, 1, 1), 40, markup=True))
 
         self.link_input = TextInput(
-            hint_text='Paste a link (YouTube, YouTube Music, Spotify)',
+            hint_text='Paste a link or type an artist name',
             multiline=False, size_hint_y=None, height=dp(48),
             background_color=(0.12, 0.12, 0.12, 1),
             foreground_color=(0.95, 0.95, 0.95, 1),

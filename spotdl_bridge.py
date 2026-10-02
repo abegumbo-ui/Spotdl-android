@@ -39,7 +39,8 @@ ATTEMPT_PLANS = [None, ['android_vr'], None]
 AUDIO_TRACK = 'MUSIC_VIDEO_TYPE_ATV'  # YouTube Music's "song" (audio) type
 
 _BAD_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
-_YT_ID = re.compile(r'(?:v=|youtu\.be/|/shorts/)([\w-]{11})')
+_YT_ID = re.compile(r'(?:[?&]v=|youtu\.be/|/shorts/|/embed/|/live/|/v/)([\w-]{11})')
+_CHANNEL = re.compile(r'youtube\.com/(?:@[^/?#\s]+|c/[^/?#\s]+|user/[^/?#\s]+)')
 _SPOTIFY = re.compile(
     r'open\.spotify\.com/(?:intl-[a-z]+/)?(track|album|playlist|artist)/(\w+)')
 _ANSI = re.compile(r'\x1b\[[0-9;]*m')
@@ -302,15 +303,72 @@ def find_song(yt, title, artist, duration, require_title=True):
     return _pick_version(res, duration)
 
 
+_NOISE = re.compile(
+    r'[\(\[][^\)\]]*?(official|video|audio|lyric|visuali[sz]er|hd|hq|4k|'
+    r'remaster|music video|clip)[^\)\]]*?[\)\]]', re.I)
+
+
+def _tokens(text):
+    return set(_norm(text).split())
+
+
+def _overlap(a, b):
+    a, b = _tokens(a), _tokens(b)
+    return len(a & b) / len(a | b) if a and b else 0.0
+
+
+def split_video_title(title, channel):
+    """('Artist', 'Song') from a typical upload title such as
+    'Artist - Song (Official Video)' on a channel called 'ArtistVEVO'."""
+    title = _NOISE.sub('', title or '').strip()
+    channel = re.sub(r'(?i)\s*(-\s*topic|vevo|official)\s*$', '', channel or '').strip()
+    if ' - ' in title:
+        artist, song = title.split(' - ', 1)
+        return artist.strip(), song.strip()
+    return channel, title
+
+
+def match_video_to_song(yt, title, channel, duration):
+    """Find the YouTube Music *song* that a normal video is the same track as.
+
+    Compares title, artist and length, so the right version is chosen rather
+    than the first search result. Returns a search result or None.
+    """
+    artist, song = split_video_title(title, channel)
+    seen, results = set(), []
+    for q in dict.fromkeys([f'{artist} {song}', f'{song} {artist}', song]):
+        if not q.strip():
+            continue
+        try:
+            found = yt.search(q, filter='songs', limit=8)
+        except Exception:
+            continue
+        for r in found:
+            if r.get('videoId') and r['videoId'] not in seen:
+                seen.add(r['videoId'])
+                results.append(r)
+    best, best_score = None, 0.0
+    for r in results:
+        sim = max(_overlap(song, r.get('title')), _overlap(title, r.get('title')))
+        art = _overlap(artist, _names(r.get('artists')))
+        d = r.get('duration_seconds')
+        dur_ok = bool(duration and d and abs(d - duration) <= 4)
+        ok = (sim >= 0.5 and (art > 0 or dur_ok)) or (dur_ok and sim >= 0.3)
+        score = sim * 2 + art + (1 if dur_ok else 0)
+        if ok and score > best_score:
+            best, best_score = r, score
+    return best
+
+
 def to_audio_track(yt, t):
     """Make sure a track points at a YouTube Music audio track, not a video.
 
-    Returns the track, or None when only a video exists.
+    Returns the track, or None when no audio version can be found.
     """
     if t.get('video_type') in (None, AUDIO_TRACK):
         return t
-    best, off = find_song(yt, t['title'], t['artist'], t.get('duration'))
-    if not best or (off is not None and off > DURATION_TOLERANCE):
+    best = match_video_to_song(yt, t['title'], t['artist'], t.get('duration'))
+    if not best:
         return None
     fixed = _song_to_track(yt, best, t, cover=t.get('cover'),
                            duration=t.get('duration'))
@@ -320,30 +378,89 @@ def to_audio_track(yt, t):
     return fixed
 
 
-def track_from_video_id(yt, vid):
-    """Metadata for one pasted video/song id, converted to its audio track."""
-    wp = yt.get_watch_playlist(vid, limit=1)
-    item = (wp.get('tracks') or [{}])[0]
-    if item.get('videoType') not in (None, AUDIO_TRACK):
-        counterpart = item.get('counterpart')
-        if counterpart and counterpart.get('videoId'):
-            item = counterpart
-        else:
-            raise ValueError(
-                'That link is a video, and no YouTube Music audio version of '
-                'it exists, so nothing was downloaded.')
-    album = item.get('album') or {}
-    length = item.get('length') or ''
+def _seconds(length):
     secs = None
-    if ':' in length:
+    if ':' in (length or ''):
         secs = 0
         for part in length.split(':'):
             secs = secs * 60 + int(part)
+    return secs
+
+
+def track_from_video_id(yt, vid):
+    """Any YouTube / YouTube Music video link -> its YouTube Music audio track."""
+    item = None
+    try:
+        item = (yt.get_watch_playlist(vid, limit=1).get('tracks') or [None])[0]
+    except Exception:
+        pass
+    if item and item.get('videoType') in (None, AUDIO_TRACK):
+        pass                                     # already a YouTube Music song
+    elif item and (item.get('counterpart') or {}).get('videoId'):
+        item = item['counterpart']               # music video -> its audio
+    else:
+        # An ordinary upload (or a video YouTube Music has no page for): find
+        # the same song in the YouTube Music catalogue by title/artist/length.
+        title = channel = ''
+        duration = None
+        if item:
+            title = item.get('title') or ''
+            channel = _names(item.get('artists'))
+            duration = _seconds(item.get('length'))
+        if not title:
+            details = yt.get_song(vid).get('videoDetails') or {}
+            title, channel = details.get('title') or '', details.get('author') or ''
+            duration = int(details['lengthSeconds']) \
+                if details.get('lengthSeconds') else None
+        best = match_video_to_song(yt, title, channel, duration)
+        if not best:
+            raise ValueError(
+                f'"{title or vid}" is an ordinary video and no matching song '
+                'was found on YouTube Music, so nothing was downloaded.')
+        return _song_to_track(
+            yt, best, {'title': title, 'artist': channel, 'album': ''},
+            duration=duration)
+    album = item.get('album') or {}
     return _track(
         item.get('videoId') or vid, item.get('title'),
         _names(item.get('artists')), album.get('name') or '',
         cover=album_cover(yt, album) or _thumb(item.get('thumbnail') or []),
-        duration=secs, video_type=AUDIO_TRACK)
+        duration=_seconds(item.get('length')), video_type=AUDIO_TRACK)
+
+
+def youtube_page_name(url):
+    """The channel's display name, read from its public YouTube page."""
+    import requests
+    r = requests.get(url, timeout=20, cookies={'CONSENT': 'YES+1'},
+                     headers={'User-Agent': 'Mozilla/5.0',
+                              'Accept-Language': 'en-US,en;q=0.9'})
+    r.raise_for_status()
+    m = (re.search(r'<meta property="og:title" content="([^"]+)"', r.text)
+         or re.search(r'<title>([^<]+)</title>', r.text))
+    if not m:
+        return ''
+    import html
+    name = html.unescape(m.group(1))
+    return re.sub(r'(?i)\s*-\s*(youtube|topic)\s*$', '', name).strip()
+
+
+def tracks_from_channel_url(yt, url, log):
+    """Artist/channel link (YouTube Music or YouTube, any address style)."""
+    m = re.search(r'/(?:channel|browse)/(UC[\w-]{20,})', url)
+    if m:
+        try:
+            tracks, name = tracks_from_artist(yt, m.group(1), log)
+            if tracks:
+                return tracks, name
+        except Exception as e:
+            log(f'  Not a YouTube Music artist page ({_clean_error(e)}); '
+                'looking the artist up by name instead.', 'info')
+    name = youtube_page_name(url if url.startswith('http') else 'https://' + url)
+    if not name:
+        raise ValueError("Couldn't read this channel's name from YouTube. "
+                         'Type the artist name instead.')
+    log(f'Channel: {name}', 'info')
+    return tracks_from_artist_name(yt, name, log)
 
 
 def tracks_from_youtube_url(yt, url, log):
@@ -352,9 +469,8 @@ def tracks_from_youtube_url(yt, url, log):
     if m:
         tracks = tracks_from_album(yt, m.group(1))
         return tracks, tracks[0]['album'] if tracks else ''
-    m = re.search(r'/(?:channel|browse)/(UC[\w-]{20,})', url)   # artist
-    if m:
-        return tracks_from_artist(yt, m.group(1), log)
+    if re.search(r'/(?:channel|browse)/UC[\w-]{20,}', url) or _CHANNEL.search(url):
+        return tracks_from_channel_url(yt, url, log)  # artist / channel page
     m = re.search(r'[?&]list=([\w-]+)', url)          # playlist / OLAK album
     if m and ('watch?v=' not in url or 'playlist' in url):
         pl = yt.get_playlist(m.group(1), limit=None)
@@ -501,6 +617,25 @@ def spotify_api_items(kind, sid, token):
     return out, title
 
 
+def spotify_artist_name(url):
+    """Name of the artist on a Spotify artist link (from the public embed page)."""
+    import requests
+    m = _SPOTIFY.search(url)
+    r = requests.get(f'https://open.spotify.com/embed/artist/{m.group(2)}',
+                     headers=SPOTIFY_UA, timeout=20)
+    r.raise_for_status()
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', r.text, re.S)
+    entity = {}
+    if m:
+        entity = (json.loads(m.group(1)).get('props', {}).get('pageProps', {})
+                  .get('state', {}).get('data', {}).get('entity', {}))
+    name = entity.get('name') or entity.get('title') or ''
+    if not name:
+        t = re.search(r'<title>([^<]+)</title>', r.text)
+        name = re.sub(r'(?i)\s*[-|].*$', '', t.group(1)).strip() if t else ''
+    return name
+
+
 def spotify_items(url, log):
     """Songs of a Spotify track/album/playlist link. Returns (items, title)."""
     import requests
@@ -508,10 +643,6 @@ def spotify_items(url, log):
     if not m:
         return [], ''
     kind, sid = m.groups()
-    if kind == 'artist':
-        raise ValueError('Spotify artist links are not supported. Paste an '
-                         'album, playlist or track link, or type the artist '
-                         'name instead.')
     r = requests.get(f'https://open.spotify.com/embed/{kind}/{sid}',
                      headers=SPOTIFY_UA, timeout=20)
     r.raise_for_status()
@@ -1085,6 +1216,15 @@ def download(link, output_path, audio_format, ui, retry_path=None):
             items, title, link = saved['items'], saved.get('title', ''), \
                 saved.get('link', '')
             log(f'Retrying {len(items)} song(s) that failed before.', 'info')
+        elif _SPOTIFY.search(link) and _SPOTIFY.search(link).group(1) == 'artist':
+            ui.set_status('Reading Spotify artist...')
+            name = spotify_artist_name(link)
+            if not name:
+                raise ValueError("Couldn't read the artist name from this "
+                                 'Spotify link. Type the artist name instead.')
+            log(f'Spotify artist: {name}. Using their albums and singles on '
+                'YouTube Music.', 'info')
+            items, title = tracks_from_artist_name(yt, name, log)
         elif _SPOTIFY.search(link):
             ui.set_status('Reading Spotify link...')
             items, title = spotify_items(link, log)

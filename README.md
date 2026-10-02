@@ -4,9 +4,15 @@ A small Android app: paste a link, press **Go**, and watch the progress.
 Downloads are saved to a folder called **SpotDL Downloader** in your phone's
 internal storage, organised as `<Artist>/<Album>/<Song title>`.
 
-Accepted links: YouTube or YouTube Music (video, playlist, album, artist),
-and Spotify (track, album, playlist). You can also type an artist name to
-download their albums and singles.
+Accepted links: YouTube or YouTube Music (song, video, playlist, album, artist
+or channel in any address style, including `@name`), and Spotify (track, album,
+playlist, artist). You can also type an artist name to download their albums
+and singles.
+
+- A normal YouTube video of a song is matched to the same song on YouTube Music
+  (by title, artist and length) and the audio comes from YouTube Music.
+- Artist links download the artist's albums and singles from YouTube Music. For
+  a Spotify artist link the artist's name is read from Spotify first.
 
 On first launch Android asks for permission. Allow **All files access** so
 the app can create the `SpotDL Downloader` folder.
