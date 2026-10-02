@@ -192,11 +192,17 @@ class SpotDLLayout(BoxLayout):
 
 class SpotDLApp(App):
     def build(self):
-        request_permissions([
-            Permission.WRITE_EXTERNAL_STORAGE,
-            Permission.READ_EXTERNAL_STORAGE,
-            Permission.INTERNET,
-        ])
+        if platform == 'android':
+            try:
+                from android.permissions import request_permissions, Permission
+                perms = [Permission.WRITE_EXTERNAL_STORAGE,
+                         Permission.READ_EXTERNAL_STORAGE]
+                # Android 13+ replaced READ_EXTERNAL_STORAGE for audio files.
+                if hasattr(Permission, 'READ_MEDIA_AUDIO'):
+                    perms.append(Permission.READ_MEDIA_AUDIO)
+                request_permissions(perms)
+            except Exception:
+                pass
         return SpotDLLayout()
 
 
