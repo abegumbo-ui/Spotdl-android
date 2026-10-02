@@ -1,7 +1,15 @@
 # SpotDL Android
 
-A small Android app that downloads every album and single of an artist as
-audio files, saved to `Music/SpotDL/<Artist>/<Album>/` on your phone.
+A small Android app: paste a link, press **Go**, and watch the progress.
+Downloads are saved to a folder called **SpotDL Downloader** in your phone's
+internal storage, organised as `<Artist>/<Album>/<Track>`.
+
+Accepted links: YouTube or YouTube Music (video, playlist, album, artist),
+and Spotify (track, album, playlist). You can also type an artist name to
+download their albums and singles.
+
+On first launch Android asks for permission. Allow **All files access** so
+the app can create the `SpotDL Downloader` folder.
 
 ## Getting the APK (no Android Studio needed)
 
@@ -30,8 +38,8 @@ pure-Python libraries instead:
 Formats: `m4a` (AAC, tagged with cover art) or `opus` (saved as `.webm`,
 untagged). Without ffmpeg, MP3 or FLAC conversion isn't possible.
 
-If the shared Music folder can't be written to, files go to the app's
-private storage. The path is shown on screen.
+If the permission isn't granted, files go to the app's private storage
+instead. The path is shown on screen.
 
 ## Files
 
