@@ -3,8 +3,10 @@ SpotDL Downloader - Kivy UI
 Paste a link, press Go, watch every song download.
 """
 import io
+import json
 import os
 import threading
+import time
 
 from kivy.app import App
 from kivy.clock import Clock
@@ -22,6 +24,8 @@ from kivy.uix.spinner import Spinner
 from kivy.uix.textinput import TextInput
 from kivy.uix.togglebutton import ToggleButton
 from kivy.utils import platform, escape_markup
+
+import service as svc
 
 Window.clearcolor = (0.05, 0.05, 0.05, 1)
 
@@ -106,9 +110,13 @@ class SpotDLLayout(BoxLayout):
         super().__init__(orientation='vertical', padding=dp(16),
                          spacing=dp(8), **kwargs)
         self.log_lines = []
-        self.cancel_requested = False
         self.running = False
         self.output_path = None
+        self.state_dir = None
+        self.p = {}
+        self._st = None             # last state read from the service
+        self._mtime = None
+        self._seen = {}             # what the screen is already showing
         self.queue_rows = []        # [(label, track)]
         self._done = 0
         self._total = 0
@@ -349,11 +357,97 @@ class SpotDLLayout(BoxLayout):
             f'{target}')
         return False
 
+    # ------------------------------------------- background download job
+    def attach(self, state_dir):
+        """Start watching the progress file written by the download service."""
+        self.state_dir = state_dir
+        os.makedirs(state_dir, exist_ok=True)
+        self.p = svc.paths(state_dir)
+        Clock.schedule_interval(self.poll, 0.5)
+
+    def poll(self, dt):
+        try:
+            mtime = os.path.getmtime(self.p['state'])
+            if mtime != self._mtime:
+                with open(self.p['state']) as f:
+                    self._st = json.load(f)
+                self._mtime = mtime
+        except (OSError, ValueError):
+            pass
+        st = self._st
+        if not st:
+            return
+        # A download that stopped updating (phone killed it) is not running.
+        alive = bool(st.get('running')) and \
+            time.time() - st.get('updated', 0) < svc.STALE_AFTER
+        if self.running != alive:
+            self.running = alive
+            self.go_btn.text = 'Cancel' if alive else 'Go'
+        if st.get('running') and not alive and \
+                self._seen.get('interrupted') != st.get('job'):
+            self._seen['interrupted'] = st.get('job')
+            self.set_status('The download was interrupted. Press Go to resume.')
+        if st.get('seq') != self._seen.get('seq'):
+            self._seen['seq'] = st.get('seq')
+            self._apply(st)
+
+    def _apply(self, st):
+        seen = self._seen
+        queue = st.get('queue') or []
+        sig = (st.get('job'), len(queue))
+        if sig != seen.get('queue_sig'):
+            seen['queue_sig'] = sig
+            seen['rows'] = {}
+            self.set_queue([{'artist': q['a'], 'title': q['t']} for q in queue])
+        rows = seen.setdefault('rows', {})
+        for i, q in enumerate(queue):
+            key = (q['s'], q['n'])
+            if rows.get(i) != key:
+                rows[i] = key
+                self.set_track_state(i, q['s'], q['n'])
+        if (st['done'], st['total']) != seen.get('overall'):
+            seen['overall'] = (st['done'], st['total'])
+            self.set_overall(st['done'], st['total'])
+        if st['progress'] != seen.get('progress'):
+            seen['progress'] = st['progress']
+            self.set_progress(st['progress'])
+        if st['status'] != seen.get('status') and \
+                seen.get('interrupted') != st.get('job'):
+            seen['status'] = st['status']
+            self.set_status(st['status'])
+        now = st.get('now')
+        if now and now['ver'] != seen.get('cover_ver'):
+            seen['cover_ver'] = now['ver']
+            data = None
+            if now.get('cover'):
+                try:
+                    with open(self.p['cover'], 'rb') as f:
+                        data = f.read()
+                except OSError:
+                    pass
+            self.set_now(now, data)
+        log = st.get('log') or []
+        if len(log) != seen.get('log_len') or \
+                (log and log[-1] != seen.get('log_last')):
+            seen['log_len'], seen['log_last'] = len(log), log[-1] if log else None
+            colors = {'info': 'cccccc', 'success': '1DB954',
+                      'error': 'F44336', 'warning': 'FF9800'}
+            self.log_lines = [
+                f'[color={colors.get(k, "cccccc")}]{escape_markup(m)}[/color]'
+                for m, k in log]
+            self.log_label.text = '\n'.join(self.log_lines)
+            Clock.schedule_once(
+                lambda dt: setattr(self.log_scroll, 'scroll_y', 0), 0.1)
+        if st.get('report') != seen.get('report'):
+            seen['report'] = st.get('report')
+            if st.get('report'):
+                self.set_report(st['report'])
+
     # ------------------------------------------------------ actions
     def on_go(self, *args):
         if self.running:
             # The button doubles as Cancel while a download is running.
-            self.cancel_requested = True
+            open(self.p['cancel'], 'w').close()
             self.set_status('Cancelling...')
             return
         link = self.link_input.text.strip()
@@ -361,9 +455,7 @@ class SpotDLLayout(BoxLayout):
             self.set_status('Paste a link first.')
             return
         self.prepare_folder()
-        self.running = True
-        self.cancel_requested = False
-        self.go_btn.text = 'Cancel'
+        # Clear the screen for the new job
         self.track_bar.value = 0
         self.overall_bar.value = 0
         self.overall_label.text = ''
@@ -376,25 +468,46 @@ class SpotDLLayout(BoxLayout):
         self._done = self._total = 0
         self.log_lines.clear()
         self.log_label.text = ''
-        self.set_status('Starting...')
-        threading.Thread(
-            target=self._run, args=(link, self.output_path,
-                                    self.format_spinner.text),
-            daemon=True).start()
+        self._seen = {}
+        # Hand the job to the background service
+        job = {'id': time.time(), 'link': link, 'output': self.output_path,
+               'format': self.format_spinner.text,
+               'data_dir': App.get_running_app().user_data_dir}
+        for stale in ('cancel',):
+            try:
+                os.remove(self.p[stale])
+            except OSError:
+                pass
+        with open(self.p['job'], 'w') as f:
+            json.dump(job, f)
+        self._st = {'job': job['id'], 'running': True, 'status': 'Starting...',
+                    'progress': 0.0, 'done': 0, 'total': 0, 'queue': [],
+                    'now': None, 'log': [], 'report': '', 'seq': -1,
+                    'updated': time.time()}
+        self._mtime = None
+        try:                      # make the first poll show the fresh state
+            os.remove(self.p['state'])
+        except OSError:
+            pass
+        self.running = True
+        self.go_btn.text = 'Cancel'
+        self.set_status('Starting... you can leave the app; it keeps going.')
+        self._start_job(self.p['job'])
 
-    def _run(self, link, output, fmt):
-        try:
-            import spotdl_bridge
-            spotdl_bridge.download(link, output, fmt, self)
-        except Exception as e:
-            self.log(f'Fatal error: {e}', 'error')
-            self.set_status('Failed - see log')
-        finally:
-            Clock.schedule_once(self._finished)
-
-    def _finished(self, *args):
-        self.running = False
-        self.go_btn.text = 'Go'
+    def _start_job(self, job_path):
+        if platform == 'android':
+            try:
+                from jnius import autoclass
+                activity = autoclass('org.kivy.android.PythonActivity').mActivity
+                service = autoclass('com.spotdlapp.spotdl.ServiceDownloader')
+                service.start(activity, '', 'SpotDL Downloader',
+                              'Downloading in the background', job_path)
+                return
+            except Exception as e:
+                self.log(f'Background service unavailable ({e}); '
+                         'downloading inside the app instead.', 'warning')
+        threading.Thread(target=svc.run_job, args=(job_path,),
+                         daemon=True).start()
 
 
 class SpotDLApp(App):
@@ -402,14 +515,9 @@ class SpotDLApp(App):
 
     def build(self):
         self.layout = SpotDLLayout()
-        # Fetch the newest yt-dlp / ytmusicapi in the background. A download
-        # started before this finishes simply waits for it.
-        try:
-            import updater
-            updater.activate(self.user_data_dir)
-            updater.start(self.user_data_dir, self._update_log)
-        except Exception:
-            pass
+        # Progress files shared with the background download service. (The
+        # service also updates yt-dlp / ytmusicapi at the start of each job.)
+        self.layout.attach(os.path.join(self.user_data_dir, 'jobs'))
         if platform == 'android':
             try:
                 from android.permissions import request_permissions, Permission
@@ -417,6 +525,8 @@ class SpotDLApp(App):
                          Permission.READ_EXTERNAL_STORAGE]
                 if hasattr(Permission, 'READ_MEDIA_AUDIO'):
                     perms.append(Permission.READ_MEDIA_AUDIO)
+                # Android 13+: needed to show the "downloading" notification
+                perms.append('android.permission.POST_NOTIFICATIONS')
                 request_permissions(perms, self._on_permissions)
             except Exception:
                 pass
@@ -424,9 +534,6 @@ class SpotDLApp(App):
         # or once All files access has been granted).
         Clock.schedule_once(lambda dt: self.layout.prepare_folder(), 0)
         return self.layout
-
-    def _update_log(self, msg, kind='info'):
-        self.layout.log(msg, kind)
 
     def _on_permissions(self, *args):
         # Android 11+ needs the special "All files access" switch to create a

@@ -672,6 +672,7 @@ def download_tracks(tracks, missing, output_path, audio_format, ui):
     ui.set_overall(0, total)
     covers = {}
     results = []
+    claimed = set()
 
     for i, t in enumerate(tracks):
         _check_cancel(ui)
@@ -705,10 +706,19 @@ def download_tracks(tracks, missing, output_path, audio_format, ui):
 
         folder = os.path.join(output_path, safe_name(t['album_artist']),
                               safe_name(t['album']))
-        prefix = f"{int(t['track_number']):02d} - " if t['track_number'] else ''
-        base = f"{prefix}{safe_name(t['title'])}"
+        # File names carry no track number: the order lives in the file's own
+        # tags, so renaming a file never loses its place in the album.
+        base = safe_name(t['title'])
         final = os.path.join(folder, f'{base}.{ext}')
-        if os.path.exists(final):
+        # Songs saved by earlier versions were named "01 - Title"; count them.
+        legacy = (os.path.join(folder, f"{int(t['track_number']):02d} - "
+                                       f"{base}.{ext}")
+                  if t['track_number'] else None)
+        if final in claimed:           # two songs with the same title
+            base = f"{base} ({t['track_number'] or n})"
+            final = os.path.join(folder, f'{base}.{ext}')
+        claimed.add(final)
+        if os.path.exists(final) or (legacy and os.path.exists(legacy)):
             results.append({'track': t, 'status': 'skipped',
                             'note': 'already in the folder'})
             ui.set_track_state(i, 'skipped', 'already downloaded')

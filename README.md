@@ -2,7 +2,7 @@
 
 A small Android app: paste a link, press **Go**, and watch the progress.
 Downloads are saved to a folder called **SpotDL Downloader** in your phone's
-internal storage, organised as `<Artist>/<Album>/<Track>`.
+internal storage, organised as `<Artist>/<Album>/<Song title>`.
 
 Accepted links: YouTube or YouTube Music (video, playlist, album, artist),
 and Spotify (track, album, playlist). You can also type an artist name to
@@ -38,7 +38,7 @@ pure-Python libraries instead:
 Formats: `mp3` (converted on the phone, tagged with cover art), `m4a`
 (AAC, tagged with cover art) or `opus` (saved as `.webm`, untagged).
 
-**Auto-update:** each time the app starts it downloads the newest yt-dlp and
+**Auto-update:** each time a download starts the app fetches the newest yt-dlp and
 ytmusicapi from PyPI (both are pure Python), so YouTube changes don't break it.
 If the phone is offline it uses the last version it downloaded.
 
@@ -71,3 +71,17 @@ instead. The path is shown on screen.
 Only YouTube Music audio tracks are ever downloaded, never video. Pasting a
 music-video link downloads its YouTube Music audio version; if there isn't one,
 the song is reported as unavailable instead.
+
+## Background downloads
+
+Downloads run in an Android foreground service, so you can press Go and then
+leave the app, switch to another one, or lock the screen. A notification shows
+while it works, and another one appears when it finishes. The app screen only
+shows progress; reopening it picks up the live progress again. Press **Cancel**
+in the app to stop.
+
+## Track order
+
+File names are just the song title. The track number (e.g. 3 of 12), album,
+album artist and cover are stored inside each file's tags, so music players
+keep the album in its real order even if you rename the files.
