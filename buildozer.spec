@@ -27,6 +27,7 @@ android.allow_backup = True
 
 # Pinned stable python-for-android release (Python 3.11).
 p4a.branch = v2024.01.21
+p4a.local_recipes = ./p4a-recipes
 
 [buildozer]
 log_level = 2

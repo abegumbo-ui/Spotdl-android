@@ -59,3 +59,15 @@ instead. The path is shown on screen.
 - `updater.py`: downloads the latest yt-dlp / ytmusicapi on startup
 - `buildozer.spec`: Android build configuration
 - `.github/workflows/build.yml`: GitHub Actions workflow that builds the APK
+
+## What you see while it runs
+
+- The album art and details of the song being downloaded
+- An overall bar with "X of Y done - Z left", and a list of every song with
+  its status (waiting / downloading / done / FAILED with the reason)
+- When a link has more than one song, a PDF report is saved to
+  `SpotDL Downloader/Reports/` listing what downloaded and what failed
+
+Only YouTube Music audio tracks are ever downloaded, never video. Pasting a
+music-video link downloads its YouTube Music audio version; if there isn't one,
+the song is reported as unavailable instead.
