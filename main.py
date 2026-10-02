@@ -117,7 +117,7 @@ class SpotDLLayout(BoxLayout):
 
         row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(10))
         self.format_spinner = Spinner(
-            text='m4a', values=['m4a', 'opus'], size_hint_x=0.3,
+            text='mp3', values=['mp3', 'm4a', 'opus'], size_hint_x=0.3,
             background_color=(0.2, 0.2, 0.2, 1), font_size=sp(15))
         self.go_btn = Button(
             text='Go', bold=True, font_size=sp(18),
@@ -237,6 +237,14 @@ class SpotDLApp(App):
 
     def build(self):
         self.layout = SpotDLLayout()
+        # Fetch the newest yt-dlp / ytmusicapi in the background. A download
+        # started before this finishes simply waits for it.
+        try:
+            import updater
+            updater.activate(self.user_data_dir)
+            updater.start(self.user_data_dir, self._update_log)
+        except Exception:
+            pass
         if platform == 'android':
             try:
                 from android.permissions import request_permissions, Permission
@@ -251,6 +259,9 @@ class SpotDLApp(App):
         # or once All files access has been granted).
         Clock.schedule_once(lambda dt: self.layout.prepare_folder(), 0)
         return self.layout
+
+    def _update_log(self, msg, kind='info'):
+        self.layout.log(msg, kind)
 
     def _on_permissions(self, *args):
         # Android 11+ needs the special "All files access" switch to create a

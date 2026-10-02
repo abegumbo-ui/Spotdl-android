@@ -11,7 +11,7 @@ source.exclude_dirs = .github, .buildozer, bin, tests
 version = 1.0
 
 # Only pure-Python libraries (plus p4a recipes) so the build works on Android.
-requirements = python3==3.11.5,hostpython3==3.11.5,kivy==2.3.0,pyjnius,android,openssl,sqlite3,certifi,requests,urllib3,idna,charset-normalizer,yt-dlp,ytmusicapi,mutagen
+requirements = python3==3.11.5,hostpython3==3.11.5,kivy==2.3.0,pyjnius,android,openssl,sqlite3,certifi,requests,urllib3,idna,charset-normalizer,yt-dlp,ytmusicapi,mutagen,av,ffpyplayer_codecs
 
 orientation = portrait
 fullscreen = 0
@@ -22,7 +22,7 @@ android.minapi = 24
 android.ndk = 25b
 android.ndk_api = 24
 android.accept_sdk_license = True
-android.archs = arm64-v8a, armeabi-v7a
+android.archs = arm64-v8a
 android.allow_backup = True
 
 # Pinned stable python-for-android release (Python 3.11).

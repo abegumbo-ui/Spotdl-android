@@ -35,8 +35,19 @@ pure-Python libraries instead:
 - **yt-dlp**: downloads the audio
 - **mutagen**: writes title, artist, album, track number and cover art
 
-Formats: `m4a` (AAC, tagged with cover art) or `opus` (saved as `.webm`,
-untagged). Without ffmpeg, MP3 or FLAC conversion isn't possible.
+Formats: `mp3` (converted on the phone, tagged with cover art), `m4a`
+(AAC, tagged with cover art) or `opus` (saved as `.webm`, untagged).
+
+**Auto-update:** each time the app starts it downloads the newest yt-dlp and
+ytmusicapi from PyPI (both are pure Python), so YouTube changes don't break it.
+If the phone is offline it uses the last version it downloaded.
+
+**Right version of a song:** Spotify links carry the track length. The app
+picks the YouTube Music version whose length matches, instead of the first
+search result, and uses the album's square cover art.
+
+The APK is built for 64-bit phones (arm64-v8a), which is nearly every phone
+made since 2017.
 
 If the permission isn't granted, files go to the app's private storage
 instead. The path is shown on screen.
@@ -44,6 +55,7 @@ instead. The path is shown on screen.
 ## Files
 
 - `main.py`: Kivy user interface
-- `spotdl_bridge.py`: search, download and tagging logic
+- `spotdl_bridge.py`: search, download, MP3 conversion and tagging logic
+- `updater.py`: downloads the latest yt-dlp / ytmusicapi on startup
 - `buildozer.spec`: Android build configuration
 - `.github/workflows/build.yml`: GitHub Actions workflow that builds the APK
