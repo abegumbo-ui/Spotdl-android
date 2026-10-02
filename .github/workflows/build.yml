@@ -29,7 +29,7 @@ jobs:
             pkg-config zlib1g-dev libncurses-dev cmake libffi-dev libssl-dev \
             build-essential lld libltdl-dev gettext
           pip install --upgrade pip
-          pip install buildozer "cython<3.1" setuptools virtualenv
+          pip install buildozer "cython==0.29.37" setuptools virtualenv
 
       - name: Cache buildozer global directory (SDK/NDK)
         uses: actions/cache@v4
