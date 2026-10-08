@@ -12,38 +12,25 @@ import threading
 
 from kivy.clock import Clock
 from kivy.core.image import Image as CoreImage
-from kivy.graphics import Color, Line, Rectangle
+from kivy.graphics import Color, Line
 from kivy.metrics import dp, sp
 from kivy.uix.behaviors import ButtonBehavior
 from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.button import Button
-from kivy.uix.checkbox import CheckBox
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.gridlayout import GridLayout
-from kivy.uix.image import Image
-from kivy.uix.label import Label
 from kivy.uix.modalview import ModalView
 from kivy.uix.scrollview import ScrollView
-from kivy.uix.textinput import TextInput
-from kivy.uix.togglebutton import ToggleButton
 from kivy.utils import escape_markup
 
 import search as srch
+import ui_kit as K
 
-GREEN = (0.11, 0.73, 0.33, 1)
-RED = (1.0, 0.25, 0.3, 1)
-TAGS = {'sp': ('Spotify', GREEN), 'ytm': ('YT Music', RED)}
+TAGS = {'sp': ('Spotify', K.SPOTIFY), 'ytm': ('YT Music', K.YTMUSIC)}
 NAMES = {'sp': 'Spotify', 'ytm': 'YouTube Music'}
 
 
-def _label(text='', size=13, color=(0.9, 0.9, 0.9, 1), height=None, **kw):
-    lbl = Label(text=text, font_size=sp(size), color=color, markup=True,
-                halign='left', valign='middle', **kw)
-    if height:
-        lbl.size_hint_y = None
-        lbl.height = dp(height)
-    lbl.bind(size=lambda w, s: setattr(w, 'text_size', (s[0], s[1])))
-    return lbl
+def _label(text='', size=13, color=K.TEXT, height=None, **kw):
+    return K.text_label(text, size, color, height=height, **kw)
 
 
 class ThumbLoader:
@@ -86,37 +73,34 @@ class ThumbLoader:
 class SourceThumb(ButtonBehavior, FloatLayout):
     """A cover picture with a Spotify / YT Music tag. Tap to choose it."""
 
-    def __init__(self, src, url, available=True, size=60, **kw):
+    def __init__(self, src, url, available=True, size=58, **kw):
         super().__init__(size_hint=(None, None), size=(dp(size), dp(size)), **kw)
         self.src = src
-        self.img = Image(size_hint=(1, 1), pos_hint={'x': 0, 'y': 0},
-                         allow_stretch=True, keep_ratio=True)
+        self.img = K.Cover(radius=11, size_hint=(1, 1),
+                           pos_hint={'x': 0, 'y': 0})
         self.add_widget(self.img)
         name, color = TAGS[src]
-        self.tag = Label(text=name, font_size=sp(8), bold=True,
-                         size_hint=(1, None), height=dp(13),
-                         pos_hint={'x': 0, 'y': 0}, color=(0, 0, 0, 1))
-        with self.tag.canvas.before:
-            Color(*color)
-            self._bg = Rectangle()
-        with self.canvas.after:
-            self._edge = Color(1, 1, 1, 0)
-            self._line = Line(rectangle=(0, 0, 0, 0), width=dp(2))
+        self.tag = K.Chip(name, color, size=8, height=dp(15),
+                          pos_hint={'x': 0.04, 'y': 0.04})
+        self.tag._col.rgba = (0.02, 0.03, 0.04, 0.78)   # dark pill on the picture
         self.add_widget(self.tag)
+        with self.canvas.after:
+            self._edge = Color(*K.C(K.ACCENT, 0))
+            self._line = Line(rounded_rectangle=(0, 0, 0, 0, dp(11)),
+                              width=dp(2))
         self.bind(pos=self._sync, size=self._sync)
-        self.tag.bind(pos=self._sync, size=self._sync)
         if available:
             ThumbLoader.load(url, self.img)
         else:
-            self.opacity = 0.2
+            self.opacity = 0.22
             self.disabled = True
 
     def _sync(self, *a):
-        self._bg.pos, self._bg.size = self.tag.pos, self.tag.size
-        self._line.rectangle = (self.x, self.y, self.width, self.height)
+        self._line.rounded_rectangle = (self.x, self.y, self.width,
+                                        self.height, dp(11))
 
     def set_chosen(self, chosen):
-        self._edge.rgba = (1, 1, 1, 1) if chosen else (1, 1, 1, 0)
+        self._edge.rgba = K.C(K.ACCENT, 1 if chosen else 0)
 
 
 class TapBox(ButtonBehavior, BoxLayout):
@@ -126,7 +110,7 @@ class TapBox(ButtonBehavior, BoxLayout):
 class SearchScreen(ModalView):
     def __init__(self, on_download, initial='', **kw):
         super().__init__(size_hint=(1, 1), auto_dismiss=False, background='',
-                         background_color=(0.05, 0.05, 0.05, 1), **kw)
+                         background_color=K.C(K.BG), **kw)
         self.on_download = on_download
         self.searcher = srch.Searcher()
         self.tab = 'songs'
@@ -140,91 +124,71 @@ class SearchScreen(ModalView):
 
     # ------------------------------------------------------------------ layout
     def _build(self, initial):
-        root = BoxLayout(orientation='vertical', padding=dp(12), spacing=dp(8))
-        self.header = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(6))
+        root = BoxLayout(orientation='vertical', padding=(dp(14), dp(14)),
+                         spacing=dp(10))
+        self.header = BoxLayout(size_hint_y=None, height=dp(54), spacing=dp(8))
         root.add_widget(self.header)
-        self.tabs = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(6))
-        self.tab_songs = ToggleButton(text='Songs', group='stab', state='down',
-                                      allow_no_selection=False)
-        self.tab_artists = ToggleButton(text='Artists', group='stab',
-                                        allow_no_selection=False)
-        for t in (self.tab_songs, self.tab_artists):
-            t.background_normal = t.background_down = ''
-            t.bind(state=self._tab_style)
-            self._tab_style(t, t.state)
-            self.tabs.add_widget(t)
-        self.tab_songs.bind(on_press=lambda *a: self._set_tab('songs'))
-        self.tab_artists.bind(on_press=lambda *a: self._set_tab('artists'))
+        self.tabs = K.Seg(['Songs', 'Artists'], on_select=self._on_tab)
         root.add_widget(self.tabs)
-        self.status = _label('Search for a song or an artist.', 12,
-                             (0.6, 0.6, 0.6, 1), height=34)
+        self.status = _label('Search for a song or an artist.', 12, K.MUTED,
+                             height=34)
         root.add_widget(self.status)
-        self.scroll = ScrollView()
-        self.grid = GridLayout(cols=1, size_hint_y=None, spacing=dp(4))
+        self.scroll = ScrollView(bar_width=dp(3))
+        self.grid = GridLayout(cols=1, size_hint_y=None, spacing=dp(6),
+                               padding=(0, 0, 0, dp(6)))
         self.grid.bind(minimum_height=self.grid.setter('height'))
         self.scroll.add_widget(self.grid)
         root.add_widget(self.scroll)
-        bar = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(6))
-        self.btn_all = Button(text='All', size_hint_x=0.2,
-                              background_color=(0.2, 0.2, 0.2, 1))
-        self.btn_none = Button(text='None', size_hint_x=0.2,
-                               background_color=(0.2, 0.2, 0.2, 1))
-        self.btn_go = Button(text='Download', bold=True, background_normal='',
-                             background_color=GREEN, color=(0, 0, 0, 1),
-                             disabled=True)
-        self.btn_all.bind(on_press=lambda *a: self._select_all(True))
-        self.btn_none.bind(on_press=lambda *a: self._select_all(False))
-        self.btn_go.bind(on_press=self._download)
+        bar = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(8))
+        self.btn_all = K.Btn('All', size_hint_x=0.2)
+        self.btn_none = K.Btn('None', size_hint_x=0.2)
+        self.btn_go = K.Btn('Download', icon='download', bg=K.ACCENT,
+                            fg=K.ON_ACCENT, size=15, disabled=True)
+        self.btn_all.bind(on_release=lambda *a: self._select_all(True))
+        self.btn_none.bind(on_release=lambda *a: self._select_all(False))
+        self.btn_go.bind(on_release=self._download)
         for w in (self.btn_all, self.btn_none, self.btn_go):
             bar.add_widget(w)
         root.add_widget(bar)
         self.add_widget(root)
         self._results_header(initial)
 
-    @staticmethod
-    def _tab_style(tab, state):
-        tab.background_color = GREEN if state == 'down' else (0.2, 0.2, 0.2, 1)
-        tab.color = (0, 0, 0, 1) if state == 'down' else (0.8, 0.8, 0.8, 1)
+    def _on_tab(self, index, name):
+        self._set_tab('songs' if index == 0 else 'artists')
 
     def _results_header(self, text=''):
         self.mode = 'results'
         self.header.clear_widgets()
-        close = Button(text='Close', size_hint_x=0.22,
-                       background_color=(0.25, 0.25, 0.25, 1))
-        close.bind(on_press=lambda *a: self.dismiss())
-        self.query = TextInput(text=text, hint_text='Song or artist',
-                               multiline=False, font_size=sp(15),
-                               background_color=(0.12, 0.12, 0.12, 1),
-                               foreground_color=(0.95, 0.95, 0.95, 1),
-                               hint_text_color=(0.45, 0.45, 0.45, 1),
-                               cursor_color=GREEN, padding=(dp(10), dp(12)))
-        self.query.bind(on_text_validate=lambda *a: self.do_search())
-        go = Button(text='Search', size_hint_x=0.25, bold=True,
-                    background_normal='', background_color=GREEN,
-                    color=(0, 0, 0, 1))
-        go.bind(on_press=lambda *a: self.do_search())
-        for w in (close, self.query, go):
-            self.header.add_widget(w)
-        self.tabs.height = dp(38)
+        close = K.Btn('', icon='close', size_hint=(None, 1), width=dp(54))
+        close.bind(on_release=lambda *a: self.dismiss())
+        box, self.query = K.make_input('Song or artist', 'search',
+                                       on_enter=self.do_search)
+        self.query.text = text
+        go = K.Btn('Search', bg=K.ACCENT, fg=K.ON_ACCENT, size_hint=(None, 1),
+                   width=dp(88), size=14)
+        go.bind(on_release=lambda *a: self.do_search())
+        self.header.add_widget(close)
+        self.header.add_widget(box)
+        self.header.add_widget(go)
+        self.tabs.height = dp(44)
         self.tabs.opacity = 1
 
     def _artist_header(self):
         self.mode = 'artist'
         self.header.clear_widgets()
-        back = Button(text='< Back', size_hint_x=0.25,
-                      background_color=(0.25, 0.25, 0.25, 1))
-        back.bind(on_press=lambda *a: self._back_to_results())
+        back = K.Btn('', icon='back', size_hint=(None, 1), width=dp(54))
+        back.bind(on_release=lambda *a: self._back_to_results())
         name = _label(f"[b]{escape_markup(self.artist['name'])}[/b]\n"
-                      f"[size=11sp][color=999999]from {NAMES[self.artist['source']]}"
-                      f"[/color][/size]", 15)
+                      f"[size=11sp][color={K.MUTED[1:]}]from "
+                      f"{NAMES[self.artist['source']]}[/color][/size]", 16)
         self.header.add_widget(back)
         self.header.add_widget(name)
         other = 'sp' if self.artist['source'] == 'ytm' else 'ytm'
         if other in self.artist['card']['sources']:
-            sw = Button(text=f'Use {NAMES[other]}', size_hint_x=0.35,
-                        font_size=sp(12), background_color=(0.2, 0.2, 0.2, 1))
-            sw.bind(on_press=lambda *a: self.open_artist(self.artist['card'],
-                                                         other))
+            sw = K.Btn(f'Use {NAMES[other]}', size=12, size_hint=(None, 1),
+                       width=dp(138))
+            sw.bind(on_release=lambda *a: self.open_artist(
+                self.artist['card'], other))
             self.header.add_widget(sw)
         self.tabs.height = 0
         self.tabs.opacity = 0
@@ -240,6 +204,7 @@ class SearchScreen(ModalView):
         self.grid.clear_widgets()
         self.song_state = []
         self.status.text = 'Searching Spotify and YouTube Music...'
+        self.status.color = K.C(K.MUTED)
         self._update_count()
         threading.Thread(target=self._search_thread, args=(query, token),
                          daemon=True).start()
@@ -268,8 +233,8 @@ class SearchScreen(ModalView):
         n = len(self.cards[self.tab])
         word = 'songs' if self.tab == 'songs' else 'artists'
         base = f'{n} {word} found.' if n else f'No {word} found.'
-        self.status.text = (base + ' ' + notes).strip()
-        self.status.color = (1, 0.6, 0.2, 1) if notes else (0.6, 0.6, 0.6, 1)
+        self.status.text = escape_markup((base + ' ' + notes).strip())
+        self.status.color = K.C(K.WARN if notes else K.MUTED)
 
     def _set_tab(self, tab):
         self.tab = tab
@@ -291,27 +256,33 @@ class SearchScreen(ModalView):
 
     def _song_row(self, idx, card):
         st = self.song_state[idx]
-        row = BoxLayout(size_hint_y=None, height=dp(72), spacing=dp(6))
-        check = CheckBox(size_hint_x=None, width=dp(34), active=st['selected'])
+        row = K.Surface(size_hint_y=None, height=dp(86), radius=16,
+                        padding=(dp(10), dp(8)), spacing=dp(8))
+        check = K.Check(active=st['selected'], pos_hint={'center_y': .5})
         check.bind(active=lambda w, v: self._song_selected(idx, v))
         row.add_widget(check)
         thumbs = {}
         for src in ('sp', 'ytm'):
             s = card['sources'].get(src)
-            th = SourceThumb(src, s['thumb'] if s else None, bool(s))
+            th = SourceThumb(src, s['thumb'] if s else None, bool(s),
+                             pos_hint={'center_y': .5})
             th.bind(on_release=lambda w, src=src: self._song_choose(idx, src))
             thumbs[src] = th
             row.add_widget(th)
-        info = TapBox(orientation='vertical')
-        info.bind(on_release=lambda *a: setattr(check, 'active', not check.active))
-        info.add_widget(_label(f"[b]{escape_markup(card['title'])}[/b]", 14))
+        info = TapBox(orientation='vertical', spacing=dp(1))
+        info.bind(on_release=lambda *a: setattr(check, 'active',
+                                                not check.active))
+        title = _label(escape_markup(card['title']), 14, K.TEXT, bold=True)
+        title.shorten = True
+        title.shorten_from = 'right'
+        info.add_widget(title)
         dur = srch._fmt(card['duration'])
         sub = escape_markup(card['artist']) + (f'  -  {dur}' if dur else '')
-        info.add_widget(_label(sub, 12, (0.7, 0.7, 0.7, 1)))
-        chosen = _label('', 11, (0.5, 0.8, 0.5, 1))
+        info.add_widget(_label(sub, 11.5, K.MUTED))
+        chosen = _label('', 10.5, K.ACCENT)
         info.add_widget(chosen)
         row.add_widget(info)
-        st.update(check=check, thumbs=thumbs, chosen=chosen)
+        st.update(check=check, thumbs=thumbs, chosen=chosen, row=row)
         self._paint_song(idx)
         return row
 
@@ -323,9 +294,12 @@ class SearchScreen(ModalView):
         album = f" - {src['album']}" if src.get('album') else ''
         st['chosen'].text = escape_markup(
             f"Using {NAMES[st['choice']]} cover{album}")
+        st['row'].set_bg(K.SURFACE2 if st['selected'] else K.SURFACE)
 
     def _song_selected(self, idx, value):
         self.song_state[idx]['selected'] = value
+        if 'row' in self.song_state[idx]:
+            self._paint_song(idx)
         self._update_count()
 
     def _song_choose(self, idx, src):
@@ -336,17 +310,19 @@ class SearchScreen(ModalView):
             st['check'].active = True
 
     def _artist_row(self, card):
-        row = BoxLayout(size_hint_y=None, height=dp(72), spacing=dp(8))
+        row = K.Surface(size_hint_y=None, height=dp(82), radius=16,
+                        padding=(dp(12), dp(8)), spacing=dp(10))
         for src in ('sp', 'ytm'):
             s = card['sources'].get(src)
-            th = SourceThumb(src, s['thumb'] if s else None, bool(s))
+            th = SourceThumb(src, s['thumb'] if s else None, bool(s),
+                             pos_hint={'center_y': .5})
             th.bind(on_release=lambda w, src=src, c=card: self.open_artist(c, src))
             row.add_widget(th)
         avail = ' / '.join(NAMES[s] for s in ('sp', 'ytm') if s in card['sources'])
-        info = _label(f"[b]{escape_markup(card['name'])}[/b]\n"
-                      f"[size=11sp][color=999999]Tap a cover to open their "
-                      f"songs ({avail})[/color][/size]", 14)
-        row.add_widget(info)
+        row.add_widget(_label(
+            f"[b]{escape_markup(card['name'])}[/b]\n[size=11sp]"
+            f"[color={K.MUTED[1:]}]Tap a cover to open their songs "
+            f"({avail})[/color][/size]", 15))
         return row
 
     # ------------------------------------------------------------------ artist
@@ -359,7 +335,7 @@ class SearchScreen(ModalView):
         self._artist_header()
         self.grid.clear_widgets()
         self.status.text = f"Loading {card['name']} from {NAMES[src]}..."
-        self.status.color = (0.6, 0.6, 0.6, 1)
+        self.status.color = K.C(K.MUTED)
         self._update_count()
         threading.Thread(target=self._albums_thread, args=(token,),
                          daemon=True).start()
@@ -381,11 +357,12 @@ class SearchScreen(ModalView):
                       loading=False, widgets=None)
         self.artist['albums'] = albums
         if err:
-            self.status.text = f'Could not load this artist: {err}'
-            self.status.color = (1, 0.4, 0.3, 1)
+            self.status.text = escape_markup(f'Could not load this artist: {err}')
+            self.status.color = K.C(K.DANGER)
         else:
             self.status.text = (f'{len(albums)} albums and singles. Tick what '
-                                'you want, or expand an album to pick songs.')
+                                'you want, or open an album to pick songs.')
+            self.status.color = K.C(K.MUTED)
         self._render_artist()
 
     def _render_artist(self):
@@ -395,8 +372,8 @@ class SearchScreen(ModalView):
             self.grid.add_widget(self._album_row(al))
             if al['expanded']:
                 if al['items'] is None:
-                    self.grid.add_widget(_label('Loading songs...', 12,
-                                                (0.6, 0.6, 0.6, 1), height=28))
+                    self.grid.add_widget(_label('Loading songs...', 12, K.MUTED,
+                                                height=30))
                 else:
                     al['track_checks'] = []
                     for i, it in enumerate(al['items']):
@@ -405,36 +382,42 @@ class SearchScreen(ModalView):
         self._update_count()
 
     def _album_row(self, al):
-        row = BoxLayout(size_hint_y=None, height=dp(60), spacing=dp(6))
-        check = CheckBox(size_hint_x=None, width=dp(34), active=al['selected'])
+        row = K.Surface(size_hint_y=None, height=dp(70), radius=16,
+                        padding=(dp(10), dp(8)), spacing=dp(8))
+        check = K.Check(active=al['selected'], pos_hint={'center_y': .5})
         check.bind(active=lambda w, v: self._album_selected(al, v))
         al['check'] = check
         row.add_widget(check)
-        row.add_widget(SourceThumb(al['source'], al['thumb'], True, size=50))
+        row.add_widget(SourceThumb(al['source'], al['thumb'], True, size=52,
+                                   pos_hint={'center_y': .5}))
         total = f"  -  {al['total']} songs" if al.get('total') else ''
-        info = _label(f"[b]{escape_markup(al['title'])}[/b]\n[size=11sp]"
-                      f"[color=999999]{al['kind']}  -  {al['year']}{total}"
-                      f"[/color][/size]", 13)
-        row.add_widget(info)
-        btn = Button(text='-' if al['expanded'] else '+', size_hint_x=None,
-                     width=dp(44), font_size=sp(20),
-                     background_color=(0.2, 0.2, 0.2, 1))
-        btn.bind(on_press=lambda *a: self._toggle_album(al))
+        row.add_widget(_label(
+            f"[b]{escape_markup(al['title'])}[/b]\n[size=11sp]"
+            f"[color={K.MUTED[1:]}]{al['kind']}  -  {al['year']}{total}"
+            f"[/color][/size]", 13.5))
+        btn = K.Btn('', icon='up' if al['expanded'] else 'down',
+                    size_hint=(None, None), width=dp(44), height=dp(44),
+                    radius=12, pos_hint={'center_y': .5})
+        btn.bind(on_release=lambda *a: self._toggle_album(al))
         row.add_widget(btn)
         return row
 
     def _track_row(self, al, i, it):
-        row = BoxLayout(size_hint_y=None, height=dp(34), spacing=dp(6),
-                        padding=(dp(40), 0, 0, 0))
-        check = CheckBox(size_hint_x=None, width=dp(30), active=i in al['sel'])
+        row = K.Surface(bg=K.SURFACE, radius=12, size_hint_y=None,
+                        height=dp(42), padding=(dp(46), 0, dp(12), 0),
+                        spacing=dp(8))
+        check = K.Check(active=i in al['sel'], size=(dp(24), dp(24)),
+                        pos_hint={'center_y': .5})
         check.bind(active=lambda w, v: self._track_selected(al, i, v))
         al['track_checks'].append(check)
         row.add_widget(check)
         n = it.get('track_number') or i + 1
-        dur = it.get('duration_text') or ''
-        row.add_widget(_label(f"{n}. {escape_markup(it['title'])}", 12))
-        row.add_widget(_label(dur, 11, (0.6, 0.6, 0.6, 1), size_hint_x=None,
-                              width=dp(44)))
+        title = _label(f"{n}.  {escape_markup(it['title'])}", 12.5)
+        title.shorten = True
+        title.shorten_from = 'right'
+        row.add_widget(title)
+        row.add_widget(_label(it.get('duration_text') or '', 11, K.MUTED,
+                              size_hint_x=None, width=dp(44), halign='right'))
         return row
 
     def _toggle_album(self, al):
@@ -561,8 +544,8 @@ class SearchScreen(ModalView):
         return items
 
     def _failed(self, msg):
-        self.status.text = f'Could not prepare the download: {msg}'
-        self.status.color = (1, 0.4, 0.3, 1)
+        self.status.text = escape_markup(f'Could not prepare the download: {msg}')
+        self.status.color = K.C(K.DANGER)
         self._update_count()
 
     def _finish(self, items, title):

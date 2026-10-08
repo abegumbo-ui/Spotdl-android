@@ -74,7 +74,8 @@ instead. The path is shown on screen.
 
 ## Files
 
-- `main.py`: Kivy user interface
+- `main.py`: the main screen
+- `ui_kit.py`: the app's look (colours, rounded cards, buttons, icons, progress bars)
 - `spotdl_bridge.py`: search, download, MP3 conversion and tagging logic
 - `search.py` / `search_screen.py`: song and artist search on Spotify and YouTube Music
 - `service.py`: runs the download in the background and reports progress
@@ -123,3 +124,12 @@ keep the album in its real order even if you rename the files.
   a cancel or a phone restart, skips everything already downloaded.
 - When a job ends with failed songs, a **Retry N failed** button appears. It
   downloads only those songs again and writes a second PDF report.
+
+## Look and feel
+
+A dark theme with rounded cards: a link box with a Paste shortcut, a
+MP3 / M4A / Opus switch, a Download button that becomes Cancel while a job
+runs, a card with the cover art and smooth progress bars for the song being
+downloaded, and a status pill on every song (Waiting, Downloading, Done, Had it,
+Failed). Icons and bars are drawn in code, so there are no image files to ship
+apart from the app icon and loading screen in `assets/`.
