@@ -17,6 +17,20 @@ and singles.
 On first launch Android asks for permission. Allow **All files access** so
 the app can create the `SpotDL Downloader` folder.
 
+## Searching for songs and artists
+
+Press **Search** (next to Go) and type a song or an artist.
+
+- **Songs:** results from Spotify and YouTube Music appear together. A song
+  found on both is one row with two covers; tap a cover to choose whose title,
+  album and cover art to use (the audio always comes from YouTube Music). Tick
+  the songs you want and press **Download**.
+- **Artists:** tap an artist's cover to open all their albums and singles.
+  Tick whole albums, or press **+** to open an album and pick single songs.
+  **Use Spotify / Use YouTube Music** at the top switches which service the
+  album list comes from.
+- If Spotify can't be reached, YouTube Music results are still shown with a note.
+
 ## Getting the APK (no Android Studio needed)
 
 GitHub builds the APK automatically on every push.
@@ -62,6 +76,7 @@ instead. The path is shown on screen.
 
 - `main.py`: Kivy user interface
 - `spotdl_bridge.py`: search, download, MP3 conversion and tagging logic
+- `search.py` / `search_screen.py`: song and artist search on Spotify and YouTube Music
 - `service.py`: runs the download in the background and reports progress
 - `report.py`: writes the PDF report
 - `updater.py`: downloads the latest yt-dlp / ytmusicapi on startup

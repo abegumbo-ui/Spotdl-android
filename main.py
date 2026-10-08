@@ -27,6 +27,13 @@ from kivy.utils import platform, escape_markup
 
 import service as svc
 
+try:                      # Android has no CA bundle Python can see
+    import certifi
+    os.environ.setdefault('SSL_CERT_FILE', certifi.where())
+    os.environ.setdefault('REQUESTS_CA_BUNDLE', certifi.where())
+except ImportError:
+    pass
+
 Window.clearcolor = (0.05, 0.05, 0.05, 1)
 
 FOLDER_NAME = 'SpotDL Downloader'
@@ -143,14 +150,19 @@ class SpotDLLayout(BoxLayout):
 
         row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(10))
         self.format_spinner = Spinner(
-            text='mp3', values=['mp3', 'm4a', 'opus'], size_hint_x=0.3,
+            text='mp3', values=['mp3', 'm4a', 'opus'], size_hint_x=0.24,
             background_color=(0.2, 0.2, 0.2, 1), font_size=sp(15))
         self.go_btn = Button(
             text='Go', bold=True, font_size=sp(18),
             background_normal='', background_color=GREEN,
             color=(0, 0, 0, 1))
         self.go_btn.bind(on_press=self.on_go)
+        self.search_btn = Button(
+            text='Search', font_size=sp(15), size_hint_x=0.32,
+            background_color=(0.2, 0.2, 0.2, 1))
+        self.search_btn.bind(on_press=self.open_search)
         row.add_widget(self.format_spinner)
+        row.add_widget(self.search_btn)
         row.add_widget(self.go_btn)
         self.add_widget(row)
 
@@ -487,6 +499,22 @@ class SpotDLLayout(BoxLayout):
             return
         self._begin_job({'link': link})
 
+    def open_search(self, *args):
+        """Search Spotify and YouTube Music and pick songs / artists."""
+        if self.running:
+            self.set_status('A download is running. Cancel it or wait for '
+                            'it to finish before starting another.')
+            return
+        import search_screen
+        search_screen.SearchScreen(
+            on_download=self._download_picked,
+            initial=self.link_input.text.strip()
+            if not self.link_input.text.startswith('http') else '').open()
+
+    def _download_picked(self, items, title):
+        """Download the songs chosen on the search screen."""
+        self._begin_job({'items': items, 'title': title})
+
     def on_retry(self, *args):
         """Download again only the songs that failed in the last job."""
         if not self.running and os.path.exists(self.p['failed']):
@@ -558,6 +586,11 @@ class SpotDLApp(App):
         # Progress files shared with the background download service. (The
         # service also updates yt-dlp / ytmusicapi at the start of each job.)
         self.layout.attach(os.path.join(self.user_data_dir, 'jobs'))
+        try:                      # search uses the newest downloaded ytmusicapi
+            import updater
+            updater.activate(self.user_data_dir)
+        except Exception:
+            pass
         if platform == 'android':
             try:
                 from android.permissions import request_permissions, Permission

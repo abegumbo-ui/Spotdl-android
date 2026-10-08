@@ -572,6 +572,11 @@ def _api_row(t, position, album_title='', album_cover_url=None):
         'duration': (t['duration_ms'] / 1000) if t.get('duration_ms') else None,
         'cover': album_cover_url or _images(album.get('images')),
         'year': (album.get('release_date') or '')[:4],
+        'album_artist': ', '.join(a.get('name', '')
+                                  for a in album.get('artists') or []),
+        'track_number': t.get('track_number') if album_title == ''
+        and album.get('name') else None,
+        'track_total': album.get('total_tracks'),
     }
 
 
@@ -591,6 +596,10 @@ def spotify_api_items(kind, sid, token):
             for t in page.get('items') or []:
                 row = _api_row(t, len(out) + 1, title, cover)
                 row['year'] = year
+                row['album_artist'] = ', '.join(
+                    a.get('name', '') for a in j.get('artists') or [])
+                row['track_number'] = t.get('track_number') or row['position']
+                row['track_total'] = j.get('total_tracks') or None
                 out.append(row)
             page = (_api_get(page['next'], token) if page.get('next') else None)
         return out, title
@@ -942,8 +951,15 @@ def resolve_item(yt, item, ui, total):
             cover=item.get('cover'), duration=item.get('duration'))
         track['position'] = item.get('position')
         track['year'] = item.get('year') or track['year']
-        if item.get('album'):     # an album: keep its real track order/numbers
-            track['track_number'] = item['position']
+        if item.get('album'):               # keep the album it came from
+            track['album'] = item['album']
+        if item.get('album_artist'):
+            track['album_artist'] = item['album_artist']
+        if item.get('track_number'):        # exact numbers from Spotify
+            track['track_number'] = item['track_number']
+            track['track_total'] = item.get('track_total') or 0
+        elif item.get('album') and item.get('position'):
+            track['track_number'] = item['position']     # an album link
             track['track_total'] = total
         return track, None
     if item.get('video_type') not in (None, AUDIO_TRACK):
@@ -1191,9 +1207,12 @@ def _save_failed(ui, title, link, results):
         pass
 
 
-def download(link, output_path, audio_format, ui, retry_path=None):
+def download(link, output_path, audio_format, ui, retry_path=None,
+             picked=None, picked_title=''):
     """Entry point. `link` is a URL or an artist name. With `retry_path`, only
-    the songs saved there by an earlier job (the failed ones) are attempted."""
+    the songs saved there by an earlier job (the failed ones) are attempted.
+    With `picked`, exactly those songs (chosen on the search screen) are
+    downloaded."""
     log = ui.log
     try:
         _setup_certs()
@@ -1216,6 +1235,9 @@ def download(link, output_path, audio_format, ui, retry_path=None):
             items, title, link = saved['items'], saved.get('title', ''), \
                 saved.get('link', '')
             log(f'Retrying {len(items)} song(s) that failed before.', 'info')
+        elif picked:
+            items, title = picked, picked_title
+            link = picked_title or 'Selected songs'
         elif _SPOTIFY.search(link) and _SPOTIFY.search(link).group(1) == 'artist':
             ui.set_status('Reading Spotify artist...')
             name = spotify_artist_name(link)

@@ -264,7 +264,9 @@ def run_job(job_path):
                     pass
             spotdl_bridge.download(job.get('link', ''), job['output'],
                                    job['format'], ui,
-                                   retry_path=ui.failed_path if retry else None)
+                                   retry_path=ui.failed_path if retry else None,
+                                   picked=job.get('items'),
+                                   picked_title=job.get('title', ''))
     except Exception as e:
         ui.log(f'Error: {e}', 'error')
         ui.log(traceback.format_exc(), 'error')
