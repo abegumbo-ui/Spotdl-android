@@ -7,8 +7,11 @@ class FFMpegRecipe(Recipe):
     version = 'n4.3.1'
     # Moved to github.com instead of ffmpeg.org to improve download speed
     url = 'https://github.com/FFmpeg/FFmpeg/archive/{version}.zip'
-    depends = ['sdl2']  # Need this to build correct recipe order
-    opts_depends = ['openssl', 'ffpyplayer_codecs']
+    # libshine (MP3 encoder) must be built first. Video libraries (x264, vpx)
+    # are deliberately not used: this app only handles audio, and x264's
+    # download server blocks CI machines.
+    depends = ['sdl2', 'libshine']
+    opts_depends = ['openssl']
     patches = ['patches/configure.patch']
 
     def should_build(self, arch):
@@ -43,47 +46,21 @@ class FFMpegRecipe(Recipe):
                            '-DOPENSSL_API_COMPAT=0x10002000L']
                 ldflags += ['-L' + build_dir]
 
-            if 'ffpyplayer_codecs' in self.ctx.recipe_build_order:
-                # Enable GPL
-                flags += ['--enable-gpl']
+            # MP3 encoding through libshine (LGPL, so no --enable-gpl needed)
+            flags += ['--enable-libshine']
+            build_dir = Recipe.get_recipe('libshine', self.ctx).get_build_dir(arch.arch)
+            cflags += ['-I' + build_dir + '/include/']
+            ldflags += ['-lshine', '-L' + build_dir + '/lib/']
+            ldflags += ['-lm']
 
-                # libx264
-                flags += ['--enable-libx264']
-                build_dir = Recipe.get_recipe(
-                    'libx264', self.ctx).get_build_dir(arch.arch)
-                cflags += ['-I' + build_dir + '/include/']
-                ldflags += ['-lx264', '-L' + build_dir + '/lib/']
-
-                # libshine
-                flags += ['--enable-libshine']
-                build_dir = Recipe.get_recipe('libshine', self.ctx).get_build_dir(arch.arch)
-                cflags += ['-I' + build_dir + '/include/']
-                ldflags += ['-lshine', '-L' + build_dir + '/lib/']
-                ldflags += ['-lm']
-
-                # libvpx
-                flags += ['--enable-libvpx']
-                build_dir = Recipe.get_recipe(
-                    'libvpx', self.ctx).get_build_dir(arch.arch)
-                cflags += ['-I' + build_dir + '/include/']
-                ldflags += ['-lvpx', '-L' + build_dir + '/lib/']
-
-                # Enable all codecs:
-                flags += [
-                    '--enable-parsers',
-                    '--enable-decoders',
-                    '--enable-encoders',
-                    '--enable-muxers',
-                    '--enable-demuxers',
-                ]
-            else:
-                # Enable codecs only for .mp4:
-                flags += [
-                    '--enable-parser=aac,ac3,h261,h264,mpegaudio,mpeg4video,mpegvideo,vc1',
-                    '--enable-decoder=aac,h264,mpeg4,mpegvideo',
-                    '--enable-muxer=h264,mov,mp4,mpeg2video',
-                    '--enable-demuxer=aac,h264,m4v,mov,mpegvideo,vc1,rtsp',
-                ]
+            # Enable all codecs, so any downloaded audio format can be read
+            flags += [
+                '--enable-parsers',
+                '--enable-decoders',
+                '--enable-encoders',
+                '--enable-muxers',
+                '--enable-demuxers',
+            ]
 
             # needed to prevent _ffmpeg.so: version node not found for symbol av_init_packet@LIBAVFORMAT_52
             # /usr/bin/ld: failed to set dynamic section sizes: Bad value

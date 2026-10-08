@@ -11,7 +11,7 @@ source.exclude_dirs = .github, .buildozer, bin, tests
 version = 1.5
 
 # Only pure-Python libraries (plus p4a recipes) so the build works on Android.
-requirements = python3==3.11.5,hostpython3==3.11.5,kivy==2.3.0,pyjnius,android,openssl,sqlite3,certifi,requests,urllib3,idna,charset-normalizer,yt-dlp,ytmusicapi,mutagen,av,ffpyplayer_codecs
+requirements = python3==3.11.5,hostpython3==3.11.5,kivy==2.3.0,pyjnius,android,openssl,sqlite3,certifi,requests,urllib3,idna,charset-normalizer,yt-dlp,ytmusicapi,mutagen,av
 
 orientation = portrait
 fullscreen = 0
