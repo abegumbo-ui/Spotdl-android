@@ -930,6 +930,30 @@ def _item_key(item, ext):
     return f"{ext}|yt|{item.get('video_id')}"
 
 
+def stream_url(video_id):
+    """Direct address of the audio-only stream of a YouTube Music song, for
+    previewing. Returns (url, headers, info). Nothing is downloaded."""
+    import yt_dlp
+    last = None
+    for plan in ATTEMPT_PLANS:
+        opts = {'format': 'bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio',
+                'quiet': True, 'no_warnings': True, 'noplaylist': True,
+                'logger': _QuietLogger()}
+        if plan:
+            opts['extractor_args'] = {'youtube': {'player_client': plan}}
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(
+                    f'https://music.youtube.com/watch?v={video_id}',
+                    download=False)
+            if info.get('vcodec') not in (None, 'none'):
+                raise RuntimeError('only a video stream was offered')
+            return info['url'], dict(info.get('http_headers') or {}), info
+        except Exception as e:
+            last = e
+    raise RuntimeError(_clean_error(last))
+
+
 def resolve_item(yt, item, ui, total):
     """Turn one queue entry into a YouTube Music audio track.
 
@@ -1062,7 +1086,9 @@ def download_tracks(items, yt, output_path, audio_format, ui):
                 registry.add(k, final if os.path.exists(final) else legacy)
             results.append({'track': t, 'status': 'skipped', 'retry': None,
                             'note': 'already in the folder'})
-            ui.set_track_state(i, 'skipped', 'already downloaded')
+            ui.set_track_state(
+                i, 'skipped', 'already downloaded',
+                path=final if os.path.exists(final) else legacy)
             ui.log('  = already downloaded', 'info')
             ui.set_overall(n, total)
             continue
@@ -1162,7 +1188,7 @@ def download_tracks(items, yt, output_path, audio_format, ui):
                 registry.add(k, final)
             results.append({'track': t, 'status': 'done', 'note': note,
                             'path': final, 'retry': None})
-            ui.set_track_state(i, 'done', '')
+            ui.set_track_state(i, 'done', '', path=final)
             ui.log('  + saved', 'success')
         except Cancelled:
             ui.set_track_state(i, 'pending', '')

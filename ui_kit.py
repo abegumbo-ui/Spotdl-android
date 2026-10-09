@@ -147,6 +147,13 @@ class Icon(Widget):
                 Line(rounded_rectangle=(x + .22 * s, y + .10 * s, .56 * s,
                                         .68 * s, dp(2)), width=lw)
                 line(P(.38, .78), P(.38, .88), P(.62, .88), P(.62, .78))
+            elif k == 'play':
+                Triangle(points=[*P(.30, .20), *P(.30, .80), *P(.80, .50)])
+            elif k == 'pause':
+                Line(points=[*P(.33, .22), *P(.33, .78)], width=lw * 1.4,
+                     cap='round')
+                Line(points=[*P(.67, .22), *P(.67, .78)], width=lw * 1.4,
+                     cap='round')
             elif k == 'logo':          # accent disc with a download arrow
                 Color(*C(ACCENT))
                 Ellipse(pos=(x, y), size=(s, s))

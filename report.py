@@ -3,9 +3,15 @@ report.py - writes the download report as a PDF using only the standard
 library (no reportlab / Pillow), so it adds nothing to the Android build.
 
 Text is set in the built-in Helvetica font, which covers Western European
-characters. Anything else (e.g. Japanese titles) is shown as '?'.
+characters. A line with anything else (Hebrew, Arabic, Cyrillic, Greek ...)
+is set in an embedded TrueType font instead (see pdf_font.py), with
+right-to-left text put into visual order, because a PDF cannot do that itself.
+Scripts that font lacks (Chinese, Japanese ...) still show as '?'.
 """
 import time
+
+import fonts
+import pdf_font
 
 PAGE_W, PAGE_H = 595, 842
 MARGIN = 50
@@ -64,6 +70,10 @@ class _Pdf:
         self._cur = []
         self.y = PAGE_H - MARGIN
         self.image = None        # (bytes, w, h, comps)
+        self.ttf = None          # embedded font, loaded only when needed
+        self._ttf_tried = False
+        self.used_glyphs = {0}
+        self.uni_used = False
 
     # -- drawing -----------------------------------------------------------
     def _new_page(self):
@@ -80,10 +90,32 @@ class _Pdf:
                 self._new_page()
             self.y -= size
             r, g, b = color
+            try:
+                line.encode('cp1252')
+                shown, face = f'({_esc(line)})', font
+            except UnicodeEncodeError:
+                shown, face = self._unicode_text(line), 'F3'
             self._cur.append(
-                f'BT /{font} {size} Tf {r} {g} {b} rg '
-                f'{MARGIN + indent} {self.y:.1f} Td ({_esc(line)}) Tj ET')
+                f'BT /{face} {size} Tf {r} {g} {b} rg '
+                f'{MARGIN + indent} {self.y:.1f} Td {shown} Tj ET')
             self.y -= gap
+
+    def _unicode_text(self, line):
+        """A line as embedded-font glyph numbers (hex), or '?'s if there is no
+        font to embed."""
+        if self.ttf is None and not self._ttf_tried:
+            self._ttf_tried = True
+            try:
+                with open(fonts.DEJAVU, 'rb') as f:
+                    self.ttf = pdf_font.TTF(f.read())
+            except Exception:
+                self.ttf = None
+        if self.ttf is None:
+            return f'({_esc(line)})'
+        gids = [self.ttf.glyph(ord(c)) for c in fonts.visual(line)]
+        self.used_glyphs.update(gids)
+        self.uni_used = True
+        return '<' + ''.join(f'{g:04X}' for g in gids) + '>'
 
     def space(self, pts):
         self.y -= pts
@@ -114,6 +146,8 @@ class _Pdf:
                  b'/Encoding /WinAnsiEncoding >>')
         f2 = add(b'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold '
                  b'/Encoding /WinAnsiEncoding >>')
+        f3 = pdf_font.embed(self.ttf, self.used_glyphs, add) \
+            if self.uni_used and self.ttf else None
         img = None
         if self.image:
             data, w, h, comps = self.image
@@ -128,7 +162,10 @@ class _Pdf:
             stream = '\n'.join(ops).encode('latin-1')
             c = add(b'<< /Length %d >>\nstream\n' % len(stream) + stream +
                     b'\nendstream')
-            res = b'<< /Font << /F1 %d 0 R /F2 %d 0 R >>' % (f1, f2)
+            res = b'<< /Font << /F1 %d 0 R /F2 %d 0 R' % (f1, f2)
+            if f3:
+                res += b' /F3 %d 0 R' % f3
+            res += b' >>'
             if img:
                 res += b' /XObject << /Im1 %d 0 R >>' % img
             res += b' >>'

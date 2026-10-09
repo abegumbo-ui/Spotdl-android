@@ -148,10 +148,12 @@ class FileUI:
             self.active = 0
             self.dirty = True
 
-    def set_track_state(self, index, state, note=''):
+    def set_track_state(self, index, state, note='', path=''):
         with self.lock:
             if index < len(self.queue):
                 self.queue[index].update(s=state, n=note)
+                if path:
+                    self.queue[index]['p'] = path
                 if state == 'active':
                     self.active = index
                 self.dirty = True

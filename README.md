@@ -31,6 +31,24 @@ Press **Search** (next to Go) and type a song or an artist.
   album list comes from.
 - If Spotify can't be reached, YouTube Music results are still shown with a note.
 
+## Listening before you download
+
+Every song in the Search screen has a round **play** button. It finds the song
+on YouTube Music exactly the way the download would, then streams that audio,
+and a player bar shows the YouTube Music title, artist and album it matched, with
+a seek bar. That is how you check it is the right song before downloading. Songs
+that have finished downloading get the same button in the main list, and play
+from the saved file. Only one song plays at a time. Audio only, never video.
+
+## Other alphabets
+
+Titles in Hebrew, Spanish, Russian, Greek, Arabic, Armenian, Georgian and more
+show with their real letters (nothing is translated). Hebrew and Arabic read right
+to left. Chinese, Japanese, Korean, Thai and Indian scripts use the phone's own
+fonts. The PDF report embeds a font so these letters appear there too.
+Limits: Arabic letters are shown separately instead of joined, and Chinese,
+Japanese and Korean show as boxes in the PDF.
+
 ## Getting the APK (no Android Studio needed)
 
 GitHub builds the APK automatically on every push.
@@ -79,6 +97,8 @@ instead. The path is shown on screen.
 - `spotdl_bridge.py`: search, download, MP3 conversion and tagging logic
 - `search.py` / `search_screen.py`: song and artist search on Spotify and YouTube Music
 - `service.py`: runs the download in the background and reports progress
+- `player.py` / `player_ui.py`: the preview and file player
+- `fonts.py` / `pdf_font.py`: letters from other alphabets on screen and in the PDF
 - `report.py`: writes the PDF report
 - `updater.py`: downloads the latest yt-dlp / ytmusicapi on startup
 - `buildozer.spec`: Android build configuration

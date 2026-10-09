@@ -21,6 +21,9 @@ from kivy.utils import platform, escape_markup
 
 import service as svc
 import ui_kit as K
+from fonts import rich
+import player as PL
+from player_ui import PlayButton, PlayerBar
 
 try:                      # Android has no CA bundle Python can see
     import certifi
@@ -223,6 +226,8 @@ class SpotDLLayout(BoxLayout):
         self.body.add_widget(self.queue_scroll)
         self.add_widget(self.body)
 
+        self.player_bar = PlayerBar()
+        self.add_widget(self.player_bar)
         self.report_label = K.text_label('', 10.5, K.ACCENT_DIM, height=34)
         self.add_widget(self.report_label)
         self._refresh_overall()
@@ -258,7 +263,7 @@ class SpotDLLayout(BoxLayout):
         colors = {'info': K.MUTED, 'success': K.ACCENT,
                   'error': K.DANGER, 'warning': K.WARN}
         line = (f'[color={colors.get(kind, K.MUTED)[1:]}]'
-                f'{escape_markup(str(msg))}[/color]')
+                f'{rich(str(msg))}[/color]')
         Clock.schedule_once(lambda dt: self._append_log(line))
 
     def _append_log(self, line):
@@ -269,7 +274,7 @@ class SpotDLLayout(BoxLayout):
 
     def set_status(self, text):
         def apply(dt):
-            self.status_label.text = escape_markup(text)
+            self.status_label.text = rich(text)
             low = text.lower()
             bad = low.startswith('failed') or 'interrupted' in low
             warn = low.startswith('cancel') or 'first' in low
@@ -320,31 +325,46 @@ class SpotDLLayout(BoxLayout):
                 col.add_widget(sub)
                 row.add_widget(chip)
                 row.add_widget(col)
+                play = PlayButton(None, lambda: None, size=36,
+                                  pos_hint={'center_y': .5})
+                play.opacity, play.disabled, play.width = 0, True, 0
+                row.add_widget(play)
+                t['play'] = play
                 self.queue_rows.append((row, chip, title, sub, t))
                 self._style_row(i, 'pending', '')
                 self.queue_grid.add_widget(row)
         Clock.schedule_once(apply)
 
-    def _style_row(self, i, state, note):
+    def _style_row(self, i, state, note, path=''):
         row, chip, title, sub, t = self.queue_rows[i]
+        play = t.get('play')
+        if play is not None:
+            has = bool(path) and state in ('done', 'skipped')
+            play.opacity, play.disabled = (1 if has else 0), not has
+            play.width = dp(36) if has else 0
+            if has:
+                play.key = ('file', path)
+                play._play = lambda: PL.get().play_file(
+                    path, t['title'], t['artist'], ('file', path))
+                play._shown = None
         word, color = STATES[state]
         chip.text = word
         chip.set_color(color)
-        title.text = escape_markup(f"{t.get('i', i) + 1}. {t['title']}")
-        artist = escape_markup(t['artist'])
+        title.text = rich(f"{t.get('i', i) + 1}. {t['title']}")
+        artist = rich(t['artist'])
         if note:
             sub.text = (f'{artist}\n[color={color[1:]}]'
-                        f'{escape_markup(note)}[/color]')
+                        f'{rich(note)}[/color]')
             row.height = dp(88)
         else:
             sub.text = artist
             row.height = dp(62)
         row.set_bg(K.SURFACE2 if state == 'active' else K.SURFACE)
 
-    def set_track_state(self, index, state, note=''):
+    def set_track_state(self, index, state, note='', path=''):
         def apply(dt):
             if index < len(self.queue_rows):
-                self._style_row(index, state, note)
+                self._style_row(index, state, note, path)
                 # Keep the active song in view, but only once the list is
                 # longer than the screen (otherwise it jumps to the bottom).
                 if state == 'active' and \
@@ -359,9 +379,9 @@ class SpotDLLayout(BoxLayout):
             return
 
         def apply(dt):
-            self.now_title.text = escape_markup(track['title'])
-            self.now_artist.text = escape_markup(track['artist'])
-            self.now_album.text = escape_markup(track['album'])
+            self.now_title.text = rich(track['title'])
+            self.now_artist.text = rich(track['artist'])
+            self.now_album.text = rich(track['album'])
             self.cover.texture = None
             if cover_bytes:
                 try:
@@ -375,7 +395,7 @@ class SpotDLLayout(BoxLayout):
     def set_report(self, path):
         Clock.schedule_once(lambda dt: setattr(
             self.report_label, 'text',
-            f'PDF report saved: {escape_markup(path)}'))
+            f'PDF report saved: {rich(path)}'))
 
     # ----------------------------------------------------- storage
     def prepare_folder(self):
@@ -442,10 +462,10 @@ class SpotDLLayout(BoxLayout):
                             for r in rows_in])
         rows = seen.setdefault('rows', {})
         for k, q in enumerate(rows_in):
-            key = (q['s'], q['n'])
+            key = (q['s'], q['n'], q.get('p', ''))
             if rows.get(k) != key:
                 rows[k] = key
-                self.set_track_state(k, q['s'], q['n'])
+                self.set_track_state(k, q['s'], q['n'], q.get('p', ''))
         counts = st.get('counts') or {}
         failed = counts.get('failed', 0)
         if failed != self._failed:
@@ -490,7 +510,7 @@ class SpotDLLayout(BoxLayout):
             colors = {'info': 'cccccc', 'success': '1DB954',
                       'error': 'F44336', 'warning': 'FF9800'}
             self.log_lines = [
-                f'[color={colors.get(k, "cccccc")}]{escape_markup(m)}[/color]'
+                f'[color={colors.get(k, "cccccc")}]{rich(m)}[/color]'
                 for m, k in log]
             self.log_label.text = '\n'.join(self.log_lines)
             Clock.schedule_once(

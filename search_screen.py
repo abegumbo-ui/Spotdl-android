@@ -24,6 +24,9 @@ from kivy.utils import escape_markup
 
 import search as srch
 import ui_kit as K
+from fonts import rich
+import player as PL
+from player_ui import PlayButton, PlayerBar
 
 TAGS = {'sp': ('Spotify', K.SPOTIFY), 'ytm': ('YT Music', K.YTMUSIC)}
 NAMES = {'sp': 'Spotify', 'ytm': 'YouTube Music'}
@@ -122,6 +125,9 @@ class SearchScreen(ModalView):
         self._busy = False
         self._build(initial)
 
+    def on_dismiss(self):
+        PL.get().stop()
+
     # ------------------------------------------------------------------ layout
     def _build(self, initial):
         root = BoxLayout(orientation='vertical', padding=(dp(14), dp(14)),
@@ -139,6 +145,8 @@ class SearchScreen(ModalView):
         self.grid.bind(minimum_height=self.grid.setter('height'))
         self.scroll.add_widget(self.grid)
         root.add_widget(self.scroll)
+        self.player_bar = PlayerBar()
+        root.add_widget(self.player_bar)
         bar = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(8))
         self.btn_all = K.Btn('All', size_hint_x=0.2)
         self.btn_none = K.Btn('None', size_hint_x=0.2)
@@ -178,7 +186,7 @@ class SearchScreen(ModalView):
         self.header.clear_widgets()
         back = K.Btn('', icon='back', size_hint=(None, 1), width=dp(54))
         back.bind(on_release=lambda *a: self._back_to_results())
-        name = _label(f"[b]{escape_markup(self.artist['name'])}[/b]\n"
+        name = _label(f"[b]{rich(self.artist['name'])}[/b]\n"
                       f"[size=11sp][color={K.MUTED[1:]}]from "
                       f"{NAMES[self.artist['source']]}[/color][/size]", 16)
         self.header.add_widget(back)
@@ -233,7 +241,7 @@ class SearchScreen(ModalView):
         n = len(self.cards[self.tab])
         word = 'songs' if self.tab == 'songs' else 'artists'
         base = f'{n} {word} found.' if n else f'No {word} found.'
-        self.status.text = escape_markup((base + ' ' + notes).strip())
+        self.status.text = rich((base + ' ' + notes).strip())
         self.status.color = K.C(K.WARN if notes else K.MUTED)
 
     def _set_tab(self, tab):
@@ -269,15 +277,18 @@ class SearchScreen(ModalView):
             th.bind(on_release=lambda w, src=src: self._song_choose(idx, src))
             thumbs[src] = th
             row.add_widget(th)
+        row.add_widget(PlayButton(
+            ('song', idx), lambda: self._play_song(idx),
+            pos_hint={'center_y': .5}))
         info = TapBox(orientation='vertical', spacing=dp(1))
         info.bind(on_release=lambda *a: setattr(check, 'active',
                                                 not check.active))
-        title = _label(escape_markup(card['title']), 14, K.TEXT, bold=True)
+        title = _label(rich(card['title']), 14, K.TEXT, bold=True)
         title.shorten = True
         title.shorten_from = 'right'
         info.add_widget(title)
         dur = srch._fmt(card['duration'])
-        sub = escape_markup(card['artist']) + (f'  -  {dur}' if dur else '')
+        sub = rich(card['artist']) + (f'  -  {dur}' if dur else '')
         info.add_widget(_label(sub, 11.5, K.MUTED))
         chosen = _label('', 10.5, K.ACCENT)
         info.add_widget(chosen)
@@ -292,9 +303,14 @@ class SearchScreen(ModalView):
             th.set_chosen(src == st['choice'] and len(card['sources']) > 1)
         src = card['sources'][st['choice']]
         album = f" - {src['album']}" if src.get('album') else ''
-        st['chosen'].text = escape_markup(
+        st['chosen'].text = rich(
             f"Using {NAMES[st['choice']]} cover{album}")
         st['row'].set_bg(K.SURFACE2 if st['selected'] else K.SURFACE)
+
+    def _play_song(self, idx):
+        st, card = self.song_state[idx], self.cards['songs'][idx]
+        PL.get().play_item(card['sources'][st['choice']]['item'],
+                           ('song', idx))
 
     def _song_selected(self, idx, value):
         self.song_state[idx]['selected'] = value
@@ -320,7 +336,7 @@ class SearchScreen(ModalView):
             row.add_widget(th)
         avail = ' / '.join(NAMES[s] for s in ('sp', 'ytm') if s in card['sources'])
         row.add_widget(_label(
-            f"[b]{escape_markup(card['name'])}[/b]\n[size=11sp]"
+            f"[b]{rich(card['name'])}[/b]\n[size=11sp]"
             f"[color={K.MUTED[1:]}]Tap a cover to open their songs "
             f"({avail})[/color][/size]", 15))
         return row
@@ -357,7 +373,7 @@ class SearchScreen(ModalView):
                       loading=False, widgets=None)
         self.artist['albums'] = albums
         if err:
-            self.status.text = escape_markup(f'Could not load this artist: {err}')
+            self.status.text = rich(f'Could not load this artist: {err}')
             self.status.color = K.C(K.DANGER)
         else:
             self.status.text = (f'{len(albums)} albums and singles. Tick what '
@@ -392,7 +408,7 @@ class SearchScreen(ModalView):
                                    pos_hint={'center_y': .5}))
         total = f"  -  {al['total']} songs" if al.get('total') else ''
         row.add_widget(_label(
-            f"[b]{escape_markup(al['title'])}[/b]\n[size=11sp]"
+            f"[b]{rich(al['title'])}[/b]\n[size=11sp]"
             f"[color={K.MUTED[1:]}]{al['kind']}  -  {al['year']}{total}"
             f"[/color][/size]", 13.5))
         btn = K.Btn('', icon='up' if al['expanded'] else 'down',
@@ -412,10 +428,14 @@ class SearchScreen(ModalView):
         al['track_checks'].append(check)
         row.add_widget(check)
         n = it.get('track_number') or i + 1
-        title = _label(f"{n}.  {escape_markup(it['title'])}", 12.5)
+        title = _label(f"{n}.  {rich(it['title'])}", 12.5)
         title.shorten = True
         title.shorten_from = 'right'
         row.add_widget(title)
+        row.add_widget(PlayButton(
+            ('track', id(al), i), lambda: PL.get().play_item(
+                it, ('track', id(al), i)),
+            size=32, pos_hint={'center_y': .5}))
         row.add_widget(_label(it.get('duration_text') or '', 11, K.MUTED,
                               size_hint_x=None, width=dp(44), halign='right'))
         return row
@@ -544,7 +564,7 @@ class SearchScreen(ModalView):
         return items
 
     def _failed(self, msg):
-        self.status.text = escape_markup(f'Could not prepare the download: {msg}')
+        self.status.text = rich(f'Could not prepare the download: {msg}')
         self.status.color = K.C(K.DANGER)
         self._update_count()
 
@@ -552,5 +572,6 @@ class SearchScreen(ModalView):
         if not items:
             self._failed('nothing selected')
             return
+        PL.get().stop()
         self.dismiss()
         self.on_download(items, title)
