@@ -3,8 +3,17 @@ name: Build SpotDL APK
 on:
   push:
     branches: [ '**' ]
+    tags: [ 'v*' ]          # pushing a tag such as v1.1 publishes a Release
   pull_request:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Publish a GitHub Release with this tag, e.g. v1.1 (leave empty to only build)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write           # needed to create the GitHub Release
 
 jobs:
   build:
@@ -37,6 +46,13 @@ jobs:
           path: ~/.buildozer
           key: buildozer-global-${{ hashFiles('buildozer.spec') }}
 
+      - name: Use the fixed signing key
+        # Every build is signed with the same key, so a new APK installs over
+        # the previous one instead of being rejected as a different app.
+        run: |
+          mkdir -p ~/.android
+          cp signing/debug.keystore ~/.android/debug.keystore
+
       - name: Build APK
         shell: bash
         run: |
@@ -58,3 +74,18 @@ jobs:
           name: build-log
           path: build.log
           retention-days: 7
+
+      - name: Publish GitHub Release
+        # Runs when a v* tag is pushed, or when this workflow is started by
+        # hand with a release tag filled in.
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: |
+          cp bin/*.apk "SpotDL-Downloader-${TAG}.apk"
+          gh release create "$TAG" \
+            "SpotDL-Downloader-${TAG}.apk" \
+            --title "SpotDL Downloader ${TAG}" \
+            --notes-file RELEASE_NOTES.md \
+            --target "$GITHUB_SHA" --latest
