@@ -281,8 +281,7 @@ class SearchScreen(ModalView):
             ('song', idx), lambda: self._play_song(idx),
             pos_hint={'center_y': .5}))
         info = TapBox(orientation='vertical', spacing=dp(1))
-        info.bind(on_release=lambda *a: setattr(check, 'active',
-                                                not check.active))
+        info.bind(on_release=lambda *a: self._open_detail(idx))
         title = _label(rich(card['title']), 14, K.TEXT, bold=True)
         title.shorten = True
         title.shorten_from = 'right'
@@ -306,6 +305,13 @@ class SearchScreen(ModalView):
         st['chosen'].text = rich(
             f"Using {NAMES[st['choice']]} cover{album}")
         st['row'].set_bg(K.SURFACE2 if st['selected'] else K.SURFACE)
+
+    def _open_detail(self, idx):
+        from song_detail import SongDetail
+        st, card = self.song_state[idx], self.cards['songs'][idx]
+        SongDetail(card, st['choice'], ('song', idx), st['check'].active,
+                   lambda v: setattr(st['check'], 'active', v),
+                   ThumbLoader).open()
 
     def _play_song(self, idx):
         st, card = self.song_state[idx], self.cards['songs'][idx]

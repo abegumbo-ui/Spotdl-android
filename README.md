@@ -38,7 +38,10 @@ on YouTube Music exactly the way the download would, then streams that audio,
 and a player bar shows the YouTube Music title, artist and album it matched, with
 a seek bar. That is how you check it is the right song before downloading. Songs
 that have finished downloading get the same button in the main list, and play
-from the saved file. Only one song plays at a time. Audio only, never video.
+from the saved file. Tap a song's text to open its card: big cover, title, artist, album, year and
+length, plus the YouTube Music song the download would use (with how many seconds
+its length differs). Play it there, then press **Add to download** (tick boxes
+still work on the list). Only one song plays at a time. Audio only, never video.
 
 ## Other alphabets
 
@@ -97,7 +100,7 @@ instead. The path is shown on screen.
 - `spotdl_bridge.py`: search, download, MP3 conversion and tagging logic
 - `search.py` / `search_screen.py`: song and artist search on Spotify and YouTube Music
 - `service.py`: runs the download in the background and reports progress
-- `player.py` / `player_ui.py`: the preview and file player
+- `player.py` / `player_ui.py` / `song_detail.py`: the preview player and the song card
 - `fonts.py` / `pdf_font.py`: letters from other alphabets on screen and in the PDF
 - `report.py`: writes the PDF report
 - `updater.py`: downloads the latest yt-dlp / ytmusicapi on startup
