@@ -126,7 +126,8 @@ class SearchScreen(ModalView):
         self._build(initial)
 
     def on_dismiss(self):
-        PL.get().stop()
+        if len(PL.get().queue) <= 1:      # keep a queue you built playing
+            PL.get().stop()
 
     # ------------------------------------------------------------------ layout
     def _build(self, initial):
@@ -578,6 +579,5 @@ class SearchScreen(ModalView):
         if not items:
             self._failed('nothing selected')
             return
-        PL.get().stop()
         self.dismiss()
         self.on_download(items, title)

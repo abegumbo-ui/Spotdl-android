@@ -115,6 +115,10 @@ class _Seek(Widget):
             self.on_seek(v)
 
 
+class _Tap(ButtonBehavior, BoxLayout):
+    pass
+
+
 class PlayerBar(K.Surface):
     """Hidden until something is loaded."""
 
@@ -126,7 +130,8 @@ class PlayerBar(K.Surface):
         self.toggle = PlayButton(None, lambda: P.get().toggle(), size=40,
                                  pos_hint={'center_y': .5})
         top.add_widget(self.toggle)
-        col = BoxLayout(orientation='vertical')
+        col = _Tap(orientation='vertical')
+        col.bind(on_release=lambda *a: self._open_full())
         self.title = K.text_label('', 13.5, K.TEXT, bold=True, height=22)
         self.title.shorten = True
         self.title.shorten_from = 'right'
@@ -136,6 +141,11 @@ class PlayerBar(K.Surface):
         col.add_widget(self.title)
         col.add_widget(self.sub)
         top.add_widget(col)
+        nxt = K.IconBtn('next', size=40, icon_scale=.5,
+                        pos_hint={'center_y': .5})
+        nxt.bind(on_release=lambda *a: P.get().next())
+        self.nxt = nxt
+        top.add_widget(nxt)
         close = K.Btn('', icon='close', bg=K.SURFACE2, size=10,
                       size_hint=(None, None), width=dp(40), height=dp(40), radius=20,
                       pos_hint={'center_y': .5})
@@ -154,6 +164,10 @@ class PlayerBar(K.Surface):
         self.add_widget(row)
         self._visible = False
         Clock.schedule_interval(self.refresh, 0.25)
+
+    def _open_full(self):
+        from now_playing import open_now_playing
+        open_now_playing()
 
     def _show(self, on):
         if on == self._visible:
@@ -178,6 +192,8 @@ class PlayerBar(K.Surface):
             self.sub.text = rich('Loading...' if pl.state == 'loading'
                                  and not pl.subtitle else pl.subtitle)
             self.sub.color = K.C(K.MUTED)
+        self.nxt.opacity = 1 if pl.pos + 1 < len(pl.order) or \
+            pl.repeat == 'all' else .3
         self.t_now.text = _mmss(pl.position())
         self.t_len.text = _mmss(pl.duration) if pl.duration else ''
         self.seek.set_value(pl.fraction())

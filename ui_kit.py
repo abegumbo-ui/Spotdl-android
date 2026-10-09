@@ -7,7 +7,8 @@ are no image or font files to ship. Icons are drawn shapes too.
 import math
 
 from kivy.animation import Animation
-from kivy.graphics import (Color, Ellipse, Line, RoundedRectangle, Triangle)
+from kivy.graphics import (Color, Ellipse, Line, Mesh, Rectangle,
+                           RoundedRectangle, Triangle)
 from kivy.metrics import dp, sp
 from kivy.properties import BooleanProperty, NumericProperty, ObjectProperty
 from kivy.uix.anchorlayout import AnchorLayout
@@ -154,6 +155,66 @@ class Icon(Widget):
                      cap='round')
                 Line(points=[*P(.67, .22), *P(.67, .78)], width=lw * 1.4,
                      cap='round')
+            elif k in ('next', 'prev'):
+                d = 1 if k == 'next' else -1
+                cx = .5 - d * .06
+                Triangle(points=[*P(cx - d * .26, .24), *P(cx - d * .26, .76),
+                                 *P(cx + d * .20, .50)])
+                line(P(.5 + d * .30, .26), P(.5 + d * .30, .74))
+            elif k == 'shuffle':
+                line(P(.12, .72), P(.38, .72), P(.62, .28), P(.82, .28))
+                line(P(.12, .28), P(.38, .28), P(.62, .72), P(.82, .72))
+                Triangle(points=[*P(.92, .28), *P(.78, .40), *P(.78, .16)])
+                Triangle(points=[*P(.92, .72), *P(.78, .84), *P(.78, .60)])
+            elif k in ('repeat', 'repeat1'):
+                line(P(.14, .50), P(.14, .68), P(.66, .68))
+                line(P(.86, .50), P(.86, .32), P(.34, .32))
+                Triangle(points=[*P(.94, .68), *P(.64, .90), *P(.64, .46)])
+                Triangle(points=[*P(.06, .32), *P(.36, .54), *P(.36, .10)])
+                if k == 'repeat1':
+                    line(P(.45, .52), P(.52, .58), P(.52, .42))
+            elif k in ('heart', 'heart_fill'):
+                pts = []
+                for i in range(40):
+                    t = i / 40 * 2 * math.pi
+                    hx = 16 * math.sin(t) ** 3
+                    hy = (13 * math.cos(t) - 5 * math.cos(2 * t)
+                          - 2 * math.cos(3 * t) - math.cos(4 * t))
+                    pts.append((x + (.5 + hx / 36) * s, y + (.52 + hy / 36) * s))
+                if k == 'heart_fill':
+                    cx0, cy0 = x + .5 * s, y + .52 * s
+                    verts = [cx0, cy0, 0, 0]
+                    for px, py in pts + [pts[0]]:
+                        verts += [px, py, 0, 0]
+                    Mesh(vertices=verts, indices=list(range(len(verts) // 4)),
+                         mode='triangle_fan')
+                Line(points=[c for p in pts for c in p], width=lw, close=True,
+                     joint='round')
+            elif k == 'queue':
+                line(P(.14, .72), P(.62, .72))
+                line(P(.14, .50), P(.62, .50))
+                line(P(.14, .28), P(.42, .28))
+                Triangle(points=[*P(.70, .38), *P(.70, .78), *P(.92, .58)])
+            elif k == 'dots':
+                for v in (.2, .5, .8):
+                    Ellipse(pos=(x + .5 * s - lw * .8, y + v * s - lw * .8),
+                            size=(lw * 1.6, lw * 1.6))
+            elif k == 'moon':           # a timer
+                Line(circle=(x + .5 * s, y + .46 * s, .32 * s), width=lw)
+                line(P(.5, .46), P(.5, .66))
+                line(P(.5, .46), P(.64, .38))
+                line(P(.42, .92), P(.58, .92))
+            elif k == 'music':
+                Line(circle=(x + .32 * s, y + .26 * s, .13 * s), width=lw)
+                line(P(.45, .28), P(.45, .82), P(.78, .74))
+            elif k == 'library':
+                line(P(.22, .18), P(.22, .82))
+                line(P(.42, .18), P(.42, .82))
+                line(P(.62, .20), P(.80, .80))
+            elif k == 'trash':
+                line(P(.22, .76), P(.78, .76))
+                line(P(.40, .76), P(.40, .86), P(.60, .86), P(.60, .76))
+                line(P(.28, .76), P(.32, .14), P(.68, .14), P(.72, .76))
             elif k == 'logo':          # accent disc with a download arrow
                 Color(*C(ACCENT))
                 Ellipse(pos=(x, y), size=(s, s))
@@ -226,6 +287,43 @@ class Btn(ButtonBehavior, AnchorLayout):
             if self.icon:
                 self.icon.set_color(fg)
         self._paint()
+
+
+class IconBtn(ButtonBehavior, AnchorLayout):
+    """A round (or plain) button that only holds an icon."""
+
+    def __init__(self, kind, bg=None, fg=TEXT, size=44, icon_scale=.5, **kw):
+        kw.setdefault('size_hint', (None, None))
+        kw.setdefault('size', (dp(size), dp(size)))
+        super().__init__(anchor_x='center', anchor_y='center', **kw)
+        self._bg = C(bg) if bg else None
+        self._col = None
+        if bg:
+            with self.canvas.before:
+                self._col = Color(*self._bg)
+                self._disc = Ellipse(pos=self.pos, size=self.size)
+            self.bind(pos=self._sync, size=self._sync)
+        self.icon = Icon(kind, fg, size=(dp(size * icon_scale),
+                                         dp(size * icon_scale)))
+        self.add_widget(self.icon)
+        self.bind(state=self._press)
+
+    def _sync(self, *a):
+        self._disc.pos, self._disc.size = self.pos, self.size
+
+    def _press(self, *a):
+        self.opacity = .7 if self.state == 'down' else 1
+
+    def set_kind(self, kind):
+        if self.icon.kind != kind:
+            self.icon.kind = kind
+            self.icon._draw()
+
+    def set_look(self, bg=None, fg=None):
+        if bg is not None and self._col is not None:
+            self._col.rgba = C(bg)
+        if fg is not None:
+            self.icon.set_color(fg)
 
 
 class Seg(Surface):

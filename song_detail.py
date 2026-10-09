@@ -77,6 +77,14 @@ class SongDetail(ModalView):
                                   12, K.ACCENT, valign='top')
         info.add_widget(self.match)
         root.add_widget(info)
+        qrow = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(8))
+        nxt = K.Btn('Play next', icon='next', size=13)
+        nxt.bind(on_release=lambda *a: self._queue(True))
+        addq = K.Btn('Add to queue', icon='queue', size=13)
+        addq.bind(on_release=lambda *a: self._queue(False))
+        qrow.add_widget(nxt)
+        qrow.add_widget(addq)
+        root.add_widget(qrow)
         root.add_widget(BoxLayout())          # spacer
 
         self.player_bar = PlayerBar()
@@ -92,6 +100,10 @@ class SongDetail(ModalView):
         self.add_widget(root)
         self._paint()
         threading.Thread(target=self._lookup, args=(item,), daemon=True).start()
+
+    def _queue(self, next_up):
+        PL.get().add(PL.item_entry(self.card['sources'][self.choice]['item']),
+                     next_up)
 
     def _paint(self):
         self.pick.text = ('Remove from download' if self.selected
@@ -130,4 +142,4 @@ class SongDetail(ModalView):
             setattr(self.match, 'color', K.C(col))))
 
     def on_dismiss(self):
-        PL.get().stop()
+        pass            # a queued song keeps playing after the card closes

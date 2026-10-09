@@ -43,6 +43,26 @@ length, plus the YouTube Music song the download would use (with how many second
 its length differs). Play it there, then press **Add to download** (tick boxes
 still work on the list). Only one song plays at a time. Audio only, never video.
 
+## Library and player
+
+Press **Library** (top right of the main screen) to browse every song you have
+downloaded. It reads the files' own tags, so it also finds songs you added by hand.
+
+- **Songs / Albums / Artists / Lists / Favorites** tabs, a search box, and sorting
+  (artist, title, newest, most played). Long lists load 80 at a time.
+- Tap a song to play it; the rest of the list becomes the queue. The **...** menu
+  has Play next, Add to queue, Add to playlist, Favorite, Song info and
+  Delete from phone. The heart keeps a song in Favorites.
+- **Lists:** your own playlists, plus Recently played, Most played and
+  Recently added.
+- **Shuffle** at the top plays the current list in random order.
+- **Now playing** (tap the player bar): big cover, seek bar, previous / next,
+  shuffle, repeat (off / all / one), favorite, a sleep timer (15 / 30 / 60 min)
+  and the **Up next** queue, where you can jump to or remove songs.
+- The Android back button closes the top screen first.
+- Songs found in Search can be queued too (**Play next / Add to queue** on a
+  song's card); they stream until you download them.
+
 ## Other alphabets
 
 Titles in Hebrew, Spanish, Russian, Greek, Arabic, Armenian, Georgian and more
@@ -100,7 +120,9 @@ instead. The path is shown on screen.
 - `spotdl_bridge.py`: search, download, MP3 conversion and tagging logic
 - `search.py` / `search_screen.py`: song and artist search on Spotify and YouTube Music
 - `service.py`: runs the download in the background and reports progress
-- `player.py` / `player_ui.py` / `song_detail.py`: the preview player and the song card
+- `player.py` / `player_ui.py` / `now_playing.py`: the queue player, mini bar and full player
+- `library.py` / `library_screen.py` / `sheets.py` / `covers.py`: the library, its screens and pop-ups
+- `song_detail.py`: the song card in Search
 - `fonts.py` / `pdf_font.py`: letters from other alphabets on screen and in the PDF
 - `report.py`: writes the PDF report
 - `updater.py`: downloads the latest yt-dlp / ytmusicapi on startup

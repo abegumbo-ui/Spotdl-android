@@ -24,6 +24,8 @@ import ui_kit as K
 from fonts import rich
 import player as PL
 from player_ui import PlayButton, PlayerBar
+import library as libmod
+import now_playing
 
 try:                      # Android has no CA bundle Python can see
     import certifi
@@ -131,6 +133,12 @@ class SpotDLLayout(BoxLayout):
                                pos_hint={'center_y': .5}))
         head.add_widget(K.text_label(
             f'[b]SpotDL[/b]  [color={K.MUTED[1:]}]Downloader[/color]', 22))
+        lib_btn = K.Btn('Library', icon='library', radius=20,
+                        size_hint=(None, None), width=dp(108), height=dp(40),
+                        pos_hint={'center_y': .5})
+        lib_btn.label.font_size = sp(12)
+        lib_btn.bind(on_release=self.open_library)
+        head.add_widget(lib_btn)
         self.add_widget(head)
 
         # link box with a paste shortcut
@@ -483,6 +491,12 @@ class SpotDLLayout(BoxLayout):
         if (st['done'], st['total']) != seen.get('overall'):
             seen['overall'] = (st['done'], st['total'])
             self.set_overall(st['done'], st['total'])
+        if st.get('finished') and st.get('job') != seen.get('scanned'):
+            seen['scanned'] = st.get('job')
+            try:
+                self.get_library().scan()
+            except Exception:
+                pass
         if self.running is False and st.get('finished') and failed:
             self._failed = failed
         if st['progress'] != seen.get('progress'):
@@ -532,6 +546,22 @@ class SpotDLLayout(BoxLayout):
             self.set_status('Paste a link first.')
             return
         self._begin_job({'link': link})
+
+    def get_library(self):
+        if not self.output_path:
+            self.prepare_folder()
+        lib = getattr(self, 'library', None)
+        if lib is None or lib.root != self.output_path:
+            lib = self.library = libmod.Library(
+                self.output_path, os.path.join(
+                    App.get_running_app().user_data_dir, 'library'))
+            PL.get().on_play = lib.note_played
+            now_playing.LIB[:] = [lib]
+        return lib
+
+    def open_library(self, *args):
+        import library_screen
+        library_screen.LibraryScreen(self.get_library()).open()
 
     def open_search(self, *args):
         """Search Spotify and YouTube Music and pick songs / artists."""
@@ -640,7 +670,18 @@ class SpotDLApp(App):
         # Create the folder straight away (works on Android 10 and below,
         # or once All files access has been granted).
         Clock.schedule_once(lambda dt: self.layout.prepare_folder(), 0)
+        Window.bind(on_keyboard=self._on_key)
         return self.layout
+
+    def _on_key(self, window, key, *args):
+        """Android back button: close the top screen first."""
+        if key == 27:
+            from kivy.uix.modalview import ModalView
+            for w in reversed(Window.children):
+                if isinstance(w, ModalView):
+                    getattr(w, '_back', w.dismiss)()
+                    return True
+        return False
 
     def _on_permissions(self, *args):
         # Android 11+ needs the special "All files access" switch to create a

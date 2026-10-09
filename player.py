@@ -77,6 +77,10 @@ class AndroidBackend:
         self.release()
         ac = self._autoclass
         mp = self._MediaPlayer()
+        try:                            # keep playing with the screen off
+            mp.setWakeMode(ac('org.kivy.android.PythonActivity').mActivity, 1)
+        except Exception:
+            pass
         if str(source).startswith('http'):
             ctx = ac('org.kivy.android.PythonActivity').mActivity
             hm = ac('java.util.HashMap')()
@@ -129,56 +133,198 @@ def make_backend():
 
 
 # --------------------------------------------------------------------------
+def file_entry(path, title='', artist='', album='', duration=0):
+    return {'kind': 'file', 'path': path, 'key': ('file', path),
+            'title': title or os.path.splitext(os.path.basename(path))[0],
+            'artist': artist, 'album': album, 'duration': duration}
+
+
+def item_entry(item, key=None):
+    return {'kind': 'item', 'item': item, 'key': key or ('item', id(item)),
+            'title': item.get('title', ''), 'artist': item.get('artist', ''),
+            'album': item.get('album', ''),
+            'duration': item.get('duration') or 0}
+
+
 class Player:
-    """state: idle | loading | playing | paused | ended | error"""
+    """A queue of songs. state: idle | loading | playing | paused | ended | error
+
+    Songs are either files on the phone or search results (streamed).
+    repeat: 'off' | 'all' | 'one'.  Shuffle plays the rest of the queue in a
+    random order without losing the order you built.
+    """
 
     def __init__(self, backend=None):
         self.backend = backend or make_backend()
         self.state = 'idle'
         self.title = self.subtitle = self.error = ''
-        self.key = None                 # what is loaded (to light the right button)
+        self.key = None                 # key of the song that is loaded
         self.duration = 0.0
+        self.queue = []                 # entries, in the order you built
+        self.order = []                 # indexes into queue, in play order
+        self.pos = -1                   # position inside `order`
+        self.shuffle = False
+        self.repeat = 'off'
+        self.sleep_at = None            # time.time() when music should stop
+        self.version = 0                # bumped whenever the queue changes
+        self.on_play = None             # called with a file path when it starts
         self._gen = 0
         self._yt = None
+        self._rng = __import__('random').Random()
 
-    # ---- starting things -------------------------------------------------------
-    def _begin(self, key, title, subtitle):
+    # ---- the queue --------------------------------------------------------
+    @property
+    def current(self):
+        if 0 <= self.pos < len(self.order):
+            return self.queue[self.order[self.pos]]
+        return None
+
+    def _reorder(self, keep_current=True):
+        cur = self.order[self.pos] if 0 <= self.pos < len(self.order) else None
+        self.order = list(range(len(self.queue)))
+        if self.shuffle:
+            self._rng.shuffle(self.order)
+            if cur is not None:
+                self.order.remove(cur)
+                self.order.insert(0, cur)
+        self.pos = self.order.index(cur) if cur is not None else -1
+        self.version += 1
+
+    def play_entries(self, entries, start=0):
+        """Replace the queue and start playing entries[start]."""
+        self.queue = list(entries)
+        self.order = list(range(len(self.queue)))
+        self.pos = start
+        if self.shuffle and self.queue:
+            self._rng.shuffle(self.order)
+            self.order.remove(start)
+            self.order.insert(0, start)
+            self.pos = 0
+        self.version += 1
+        self._start_current()
+
+    def add(self, entry, next_up=False):
+        """Add a song to the end of the queue, or right after the current one."""
+        if not self.queue or self.state == 'idle':
+            return self.play_entries([entry])
+        self.queue.append(entry)
+        n = len(self.queue) - 1
+        if next_up:
+            self.order.insert(self.pos + 1, n)
+        else:
+            self.order.append(n)
+        self.version += 1
+
+    def remove_at(self, order_pos):
+        if not 0 <= order_pos < len(self.order) or order_pos == self.pos:
+            return
+        qi = self.order.pop(order_pos)
+        self.queue.pop(qi)
+        self.order = [i - 1 if i > qi else i for i in self.order]
+        if order_pos < self.pos:
+            self.pos -= 1
+        self.version += 1
+
+    def jump(self, order_pos):
+        if 0 <= order_pos < len(self.order):
+            self.pos = order_pos
+            self._start_current()
+
+    def clear_upcoming(self):
+        keep = self.order[:self.pos + 1]
+        self.queue = [self.queue[i] for i in keep]
+        self.order = list(range(len(self.queue)))
+        self.pos = len(self.queue) - 1
+        self.version += 1
+
+    def upcoming(self):
+        return [(p, self.queue[self.order[p]])
+                for p in range(self.pos + 1, len(self.order))]
+
+    def set_shuffle(self, on):
+        self.shuffle = bool(on)
+        self._reorder()
+
+    def cycle_repeat(self):
+        self.repeat = {'off': 'all', 'all': 'one', 'one': 'off'}[self.repeat]
+
+    def next(self, auto=False):
+        if not self.order:
+            return
+        if auto and self.repeat == 'one':
+            return self._start_current()
+        if self.pos + 1 < len(self.order):
+            self.pos += 1
+        elif self.repeat == 'all':
+            self.pos = 0
+            if self.shuffle:
+                self._reorder_keep_first_random()
+        else:
+            if auto:
+                self.state = 'ended'
+            return
+        self._start_current()
+
+    def _reorder_keep_first_random(self):
+        self._rng.shuffle(self.order)
+
+    def previous(self):
+        """Restart the song if it has played a few seconds, else go back."""
+        if self.position() > 3 or self.pos <= 0:
+            if self.state != 'idle':
+                self.seek(0)
+                if self.state in ('paused', 'ended'):
+                    self.toggle()
+            return
+        self.pos -= 1
+        self._start_current()
+
+    # ---- starting things ----------------------------------------------------------
+    def _begin(self, entry):
         self._gen += 1
         try:
             self.backend.release()
         except Exception:
             pass
-        self.state, self.key = 'loading', key
-        self.title, self.subtitle, self.error = title, subtitle, ''
-        self.duration = 0.0
+        self.state, self.key = 'loading', entry.get('key')
+        self.title = entry.get('title', '')
+        self.subtitle = (entry.get('artist', '') if entry['kind'] == 'file'
+                         else 'Finding the YouTube Music version...')
+        self.error = ''
+        self.duration = float(entry.get('duration') or 0)
         return self._gen
 
+    def _start_current(self):
+        entry = self.current
+        if entry is None:
+            return
+        gen = self._begin(entry)
+        target = self._run_item if entry['kind'] == 'item' else self._run_file
+        threading.Thread(target=target, args=(gen, entry), daemon=True).start()
+
     def play_item(self, item, key=None):
-        """Preview a download item (a YouTube Music track or a Spotify entry)."""
+        """Preview one search result (same button again = pause/resume)."""
         if key is not None and key == self.key and self.state in (
-                'playing', 'paused', 'ended'):
+                'playing', 'paused', 'ended', 'loading'):
             return self.toggle()
-        gen = self._begin(key, item.get('title', ''),
-                          'Finding the YouTube Music version...')
-        threading.Thread(target=self._run_item, args=(gen, item),
-                         daemon=True).start()
+        self.play_entries([item_entry(item, key)])
 
     def play_file(self, path, title='', artist='', key=None):
         if key is not None and key == self.key and self.state in (
-                'playing', 'paused', 'ended'):
+                'playing', 'paused', 'ended', 'loading'):
             return self.toggle()
-        gen = self._begin(key or path, title or os.path.basename(path),
-                          artist or 'Downloaded song')
-        threading.Thread(target=self._run_file, args=(gen, path),
-                         daemon=True).start()
+        e = file_entry(path, title, artist)
+        if key is not None:
+            e['key'] = key
+        self.play_entries([e])
 
-    def _run_item(self, gen, item):
+    def _run_item(self, gen, entry):
         try:
             import spotdl_bridge as b
             if self._yt is None:
                 from ytmusicapi import YTMusic
                 self._yt = YTMusic()
-            track, why = b.resolve_item(self._yt, item, _Quiet(), 1)
+            track, why = b.resolve_item(self._yt, entry['item'], _Quiet(), 1)
             if track is None:
                 raise RuntimeError(why)
             if gen != self._gen:
@@ -186,6 +332,8 @@ class Player:
             self.title = track['title']
             self.subtitle = (f"{track['artist']}  -  {track['album']}"
                              if track.get('album') else track['artist'])
+            entry['matched'] = {k: track.get(k) for k in
+                                ('title', 'artist', 'album', 'cover')}
             url, headers, info = b.stream_url(track['video_id'])
             if gen != self._gen:
                 return
@@ -194,8 +342,9 @@ class Player:
         except Exception as e:
             self._fail(gen, e)
 
-    def _run_file(self, gen, path):
+    def _run_file(self, gen, entry):
         try:
+            path = entry['path']
             if not os.path.exists(path):
                 raise RuntimeError('that file is no longer there')
             self.backend.load(path)
@@ -207,13 +356,20 @@ class Player:
         if gen != self._gen:
             self.backend.release()
             return
-        self.duration = self.backend.duration()
+        self.duration = self.backend.duration() or self.duration
         self.backend.start()
         self.state = 'playing'
+        e = self.current
+        if self.on_play and e and e['kind'] == 'file':
+            try:
+                self.on_play(e['path'])
+            except Exception:
+                pass
 
     def _fail(self, gen, e):
         if gen == self._gen:
             self.state, self.error = 'error', _clean(e)
+            self._skip_at = time.time() + 2.5      # move on after a moment
 
     # ---- controls ------------------------------------------------------------------------
     def toggle(self):
@@ -228,6 +384,8 @@ class Player:
                 self.backend.seek(0)
                 self.backend.start()
                 self.state = 'playing'
+            elif self.state == 'error':
+                self._start_current()
         except Exception as e:
             self.state, self.error = 'error', _clean(e)
 
@@ -238,6 +396,9 @@ class Player:
         except Exception:
             pass
         self.state, self.key, self.title, self.subtitle = 'idle', None, '', ''
+        self.queue, self.order, self.pos = [], [], -1
+        self.sleep_at = None
+        self.version += 1
 
     def seek(self, fraction):
         if self.state in ('playing', 'paused', 'ended') and self.duration:
@@ -247,6 +408,9 @@ class Player:
                     self.state = 'paused'
             except Exception:
                 pass
+
+    def set_sleep(self, minutes):
+        self.sleep_at = time.time() + minutes * 60 if minutes else None
 
     # ---- for the screen to read ---------------------------------------------------------
     def position(self):
@@ -261,13 +425,24 @@ class Player:
         return min(1.0, self.position() / self.duration) if self.duration else 0.0
 
     def tick(self):
-        """Called a few times a second: notices when a song has finished."""
+        """Called a few times a second: moves to the next song, honours the
+        sleep timer."""
+        if self.sleep_at and time.time() >= self.sleep_at:
+            self.sleep_at = None
+            if self.state == 'playing':
+                self.toggle()
         if self.state == 'playing':
             try:
                 if self.backend.finished():
                     self.state = 'ended'
             except Exception:
                 pass
+        if self.state == 'ended' and self.order:
+            self.next(auto=True)
+        elif self.state == 'error' and getattr(self, '_skip_at', 0) and \
+                time.time() >= self._skip_at and self.pos + 1 < len(self.order):
+            self._skip_at = 0
+            self.next()
 
 
 _player = None
