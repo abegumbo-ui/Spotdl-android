@@ -132,6 +132,9 @@ class FileUI:
             del self.s['log'][:-LOG_LINES]
             self.dirty = True
 
+    def set_job_title(self, title):
+        self._set(title=title or '')
+
     def set_status(self, text):
         self._set(status=text)
 
@@ -255,9 +258,12 @@ def run_job(job_path):
             base = job['data_dir']
             import updater
             updater.activate(base)
-            ui.set_status('Checking for updates...')
-            updater.check_and_update(base, ui.log)
+            import settings
+            if settings.update_due(base):
+                ui.set_status('Checking for updates...')
+                updater.check_and_update(base, ui.log)   # at most once a day
             import spotdl_bridge
+            conf = settings.load(base)
             retry = bool(job.get('retry'))
             if not retry:        # a normal job starts with a clean failed list
                 try:
@@ -268,12 +274,25 @@ def run_job(job_path):
                                    job['format'], ui,
                                    retry_path=ui.failed_path if retry else None,
                                    picked=job.get('items'),
-                                   picked_title=job.get('title', ''))
+                                   picked_title=job.get('title', ''),
+                                   workers=conf['workers'],
+                                   mode=job.get('mode', 'fill'),
+                                   upgrade=bool(conf['upgrade_mode']))
     except Exception as e:
         ui.log(f'Error: {e}', 'error')
         ui.log(traceback.format_exc(), 'error')
         ui.set_status('Failed - see log')
     finally:
+        try:
+            import history
+            counts = {'done': 0, 'skipped': 0, 'failed': 0}
+            for q in ui.queue:
+                if q['s'] in counts:
+                    counts[q['s']] += 1
+            if ui.queue and not ui.cancel_requested:
+                history.add(job['data_dir'], job, ui.s.get('title', ''), counts)
+        except Exception:
+            pass
         with ui.lock:
             status = ui.s['status']
         ui._set(running=False, finished=True,

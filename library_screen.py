@@ -376,7 +376,7 @@ class LibraryScreen(ModalView):
         col.add_widget(t)
         col.add_widget(text_label(rich(sub), 11, K.MUTED))
         card.add_widget(col)
-        card.add_widget(K.Icon('next', K.FAINT, pos_hint={'center_y': .5}))
+        card.add_widget(K.Icon('chev', K.FAINT, pos_hint={'center_y': .5}))
         row.add_widget(card)
         row.bind(on_release=lambda *a_: self._open('album', a))
         return row
@@ -402,7 +402,7 @@ class LibraryScreen(ModalView):
             col.add_widget(text_label(f"{n} song{'s' if n != 1 else ''}", 11,
                                       K.MUTED))
             card.add_widget(col)
-            card.add_widget(K.Icon('next', K.FAINT, pos_hint={'center_y': .5}))
+            card.add_widget(K.Icon('chev', K.FAINT, pos_hint={'center_y': .5}))
             row.add_widget(card)
             row.bind(on_release=lambda w, a=a: self._open('artist', a))
             self.grid.add_widget(row)
@@ -442,7 +442,7 @@ class LibraryScreen(ModalView):
         col.add_widget(text_label(f"{n} song{'s' if n != 1 else ''}", 11,
                                   K.MUTED))
         card.add_widget(col)
-        card.add_widget(K.Icon('next', K.FAINT, pos_hint={'center_y': .5}))
+        card.add_widget(K.Icon('chev', K.FAINT, pos_hint={'center_y': .5}))
         row.add_widget(card)
         row.bind(on_release=lambda *a: fn())
         return row

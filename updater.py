@@ -20,6 +20,7 @@ import zipfile
 PACKAGES = {'yt-dlp': 'yt_dlp', 'ytmusicapi': 'ytmusicapi'}
 
 _done = threading.Event()
+_done.set()                 # nothing is running until start() clears it
 _lock = threading.Lock()
 
 
@@ -94,10 +95,14 @@ def _install(base, name, module, version, url, sha256, session):
     return target
 
 
-def check_and_update(base, log=print):
-    """Run once at startup (in a thread). Never raises."""
+def check_and_update(base, log=print, force=False):
+    """Look for newer yt-dlp / ytmusicapi. Unless `force`, only when the
+    automatic daily check is on and a day has passed. Never raises."""
+    import settings
     with _lock:
         try:
+            if not force and not settings.update_due(base):
+                return
             os.makedirs(_root(base), exist_ok=True)
             activate(base)
             try:
@@ -111,11 +116,15 @@ def check_and_update(base, log=print):
             except Exception as e:
                 log(f'Update check skipped: {e}', 'warning')
                 return
+            failed = False
             for name, module in PACKAGES.items():
                 try:
                     _update_one(base, name, module, session, log)
                 except Exception as e:
+                    failed = True
                     log(f'Could not update {name}: {e}', 'warning')
+            if not failed:           # a failed look is tried again next time
+                settings.save(base, last_update_check=__import__('time').time())
         finally:
             _done.set()
 
@@ -150,6 +159,15 @@ def _update_one(base, name, module, session, log):
                 sys.path.remove(full)
             shutil.rmtree(full, ignore_errors=True)
     log(f'{name} updated to {latest}', 'success')
+
+
+def versions(base):
+    """{'yt-dlp': '2026.x', ...} for what is installed right now."""
+    out = {}
+    for name in PACKAGES:
+        marker = _read_marker(base, name)
+        out[name] = (marker['version'] if marker else _bundled_version(name)) or '?'
+    return out
 
 
 def start(base, log=print):

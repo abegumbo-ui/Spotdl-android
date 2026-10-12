@@ -17,19 +17,50 @@ and singles.
 On first launch Android asks for permission. Allow **All files access** so
 the app can create the `SpotDL Downloader` folder.
 
-## Searching for songs and artists
+## One search bar
 
-Press **Search** (next to Go) and type a song or an artist.
+Type in the box on the main screen (or paste a link) and press **Search**.
 
-- **Songs:** results from Spotify and YouTube Music appear together. A song
-  found on both is one row with two covers; tap a cover to choose whose title,
-  album and cover art to use (the audio always comes from YouTube Music). Tick
-  the songs you want and press **Download**.
-- **Artists:** tap an artist's cover to open all their albums and singles.
-  Tick whole albums, or press **+** to open an album and pick single songs.
-  **Use Spotify / Use YouTube Music** at the top switches which service the
-  album list comes from.
-- If Spotify can't be reached, YouTube Music results are still shown with a note.
+- **Words:** Spotify and YouTube Music are searched at the same time, like a
+  normal search bar. You get a top result, then Songs, Artists and Albums.
+  Results appear as soon as the first service answers.
+- **A link** (YouTube, YouTube Music or Spotify: song, album, playlist, artist,
+  channel) shows a card saying what it is before anything is downloaded.
+- **Artists** open to an artist page: Play, Shuffle and Download all, their top
+  songs, and every album and single (tick them, or tap to open one).
+- **Albums** open to the track list with Play, Shuffle, Queue and Download.
+- **Songs:** a song found on both services is one row with two covers; tap a
+  cover to choose whose title, album and cover art to use (the audio always
+  comes from YouTube Music). Tap the title for the song's card. Tick songs and
+  press **Download**.
+- If Spotify can't be reached it is skipped after a few seconds (and left alone
+  for 5 minutes), and YouTube Music results are still shown.
+
+## Faster downloads
+
+Up to 5 songs download at the same time (Settings, default 3). Songs finish
+in any order; track numbers are in the tags, so nothing is lost. Cancel and the
+3 attempts per song work as before.
+
+## Settings
+
+The gear next to Library opens Settings:
+
+- **Songs at once** (1 to 5).
+- **Updates:** installed yt-dlp and ytmusicapi versions, when they were last
+  checked, an automatic check at most **once a day** (only when a download
+  starts, never during search; can be turned off) and **Check for updates now**.
+- **Past downloads:** your recent jobs, each with **Fill gaps** and **Redo all**.
+- **Check my library for broken songs:** finds empty, very short or unreadable
+  files and offers to redo just those.
+- **Upgrade mode** (off by default): when you download something you already
+  have, also redo songs with no cover art or saved in a different format than
+  the one selected.
+
+If you press Download on something you already (partly) have, the app asks:
+**Fill the gaps**, **Redo failed songs only** or **Redo everything**. A redo
+builds each song in a side folder and replaces the old file only when the new
+one is complete, so a failed redo never costs you a song.
 
 ## Listening before you download
 
@@ -118,7 +149,8 @@ instead. The path is shown on screen.
 - `main.py`: the main screen
 - `ui_kit.py`: the app's look (colours, rounded cards, buttons, icons, progress bars)
 - `spotdl_bridge.py`: search, download, MP3 conversion and tagging logic
-- `search.py` / `search_screen.py`: song and artist search on Spotify and YouTube Music
+- `search.py` / `search_screen.py` / `artist_page.py` / `album_page.py` / `browse_ui.py`: the search bar, artist and album pages
+- `settings.py` / `settings_screen.py` / `history.py` / `history_screen.py`: settings, update schedule, past downloads
 - `service.py`: runs the download in the background and reports progress
 - `player.py` / `player_ui.py` / `now_playing.py`: the queue player, mini bar and full player
 - `library.py` / `library_screen.py` / `sheets.py` / `covers.py`: the library, its screens and pop-ups

@@ -161,6 +161,16 @@ class Icon(Widget):
                 Triangle(points=[*P(cx - d * .26, .24), *P(cx - d * .26, .76),
                                  *P(cx + d * .20, .50)])
                 line(P(.5 + d * .30, .26), P(.5 + d * .30, .74))
+            elif k == 'gear':
+                Line(circle=(x + .5 * s, y + .5 * s, .20 * s), width=lw)
+                for a in range(8):
+                    ang = a * math.pi / 4
+                    line((x + (.5 + .30 * math.cos(ang)) * s,
+                          y + (.5 + .30 * math.sin(ang)) * s),
+                         (x + (.5 + .42 * math.cos(ang)) * s,
+                          y + (.5 + .42 * math.sin(ang)) * s))
+            elif k == 'chev':
+                line(P(.38, .78), P(.64, .50), P(.38, .22))
             elif k == 'shuffle':
                 line(P(.12, .72), P(.38, .72), P(.62, .28), P(.82, .28))
                 line(P(.12, .28), P(.38, .28), P(.62, .72), P(.82, .72))

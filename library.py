@@ -288,6 +288,28 @@ class Library:
             self.playlists[name].remove(path)
             self._save_user()
 
+    def find_broken(self):
+        """Songs that look incomplete: an empty or tiny file, or one that
+        plays for only a few seconds (or cannot be read at all)."""
+        out = []
+        for s in self.songs:
+            try:
+                size = os.path.getsize(s['path'])
+            except OSError:
+                continue
+            if size < 30 * 1024 or s['duration'] <= 5:
+                out.append(s)
+        return out
+
+    @staticmethod
+    def repair_items(songs):
+        """Download items that find each song again by name and put the new
+        copy exactly where the broken one is."""
+        return [{'pending': True, 'position': 0, 'title': s['title'],
+                 'artist': s['artist'], 'album': s['album'],
+                 'album_artist': s['album_artist'], 'duration': None,
+                 'replace_path': s['path']} for s in songs]
+
     def delete_song(self, path):
         """Delete a downloaded file from the phone (and forget it)."""
         try:

@@ -18,6 +18,8 @@ import glob
 import json
 import os
 import re
+import shutil
+import threading
 import time
 import traceback
 
@@ -543,10 +545,10 @@ def _spotify_tokens(embed_data):
         pass
 
 
-def _api_get(url, token, params=None):
+def _api_get(url, token, params=None, timeout=30, tries=4):
     import requests
-    for attempt in range(4):
-        r = requests.get(url, params=params, timeout=30,
+    for attempt in range(tries):
+        r = requests.get(url, params=params, timeout=timeout,
                          headers={'Authorization': f'Bearer {token}',
                                   **SPOTIFY_UA})
         if r.status_code == 429:               # rate limited: wait, retry
@@ -901,6 +903,7 @@ class Registry:
 
     def __init__(self, output_path):
         self.path = os.path.join(output_path, '.spotdl_done.txt')
+        self._lock = threading.Lock()
         self.done = {}
         try:
             with open(self.path, encoding='utf-8') as f:
@@ -916,12 +919,13 @@ class Registry:
         return where if where and os.path.exists(where) else None
 
     def add(self, key, where):
-        self.done[key] = where
-        try:
-            with open(self.path, 'a', encoding='utf-8') as f:
-                f.write(f'{key}\t{where}\n')
-        except OSError:
-            pass
+        with self._lock:
+            self.done[key] = where
+            try:
+                with open(self.path, 'a', encoding='utf-8') as f:
+                    f.write(f'{key}\t{where}\n')
+            except OSError:
+                pass
 
 
 def _item_key(item, ext):
@@ -994,77 +998,131 @@ def resolve_item(yt, item, ui, total):
     return item, None
 
 
-def download_tracks(items, yt, output_path, audio_format, ui):
-    """Download every song, one after another (matching each Spotify song only
-    when its turn comes). Returns result dicts for the report; each carries
-    `retry` - what to feed back in to try that song again."""
+def _embedded_cover(path):
+    """True if the file already carries a cover picture (used by upgrade
+    mode). Unknown files count as having one, so they are not redone."""
+    try:
+        import mutagen
+        mf = mutagen.File(path)
+        tags = getattr(mf, 'tags', None)
+        if tags is None:
+            return False
+        if hasattr(tags, 'getall'):
+            return bool(tags.getall('APIC'))
+        if 'covr' in tags:
+            return bool(tags['covr'])
+    except Exception:
+        return True
+    return True
+
+
+def needs_upgrade(path, ext):
+    """Upgrade mode: a song already on disk that is worth downloading again -
+    saved in another format than the one chosen now, or missing its cover."""
+    if not path or not os.path.exists(path):
+        return False
+    have = os.path.splitext(path)[1].lstrip('.').lower()
+    want = 'webm' if ext == 'webm' else ext
+    if have and have != want:
+        return True
+    return ext in ('mp3', 'm4a') and not _embedded_cover(path)
+
+
+def download_tracks(items, yt, output_path, audio_format, ui, workers=1,
+                    mode='fill', upgrade=False):
+    """Download the songs, `workers` at a time (matching each Spotify song only
+    when its turn comes). Returns result dicts for the report, in order; each
+    carries `retry` - what to feed back in to try that song again.
+
+    mode 'fill' skips songs already downloaded; 'redo' downloads every song
+    again, replacing the old file only once the new one is complete. With
+    `upgrade`, fill mode also redoes songs saved in another format or without
+    cover art."""
+    import threading
     import yt_dlp
     selector, ext = FORMATS.get(audio_format, FORMATS['m4a'])
     total = len(items)
+    workers = max(1, min(5, int(workers or 1)))
     ui.set_queue(items)
     ui.set_overall(0, total)
     covers = {}
-    results = []
+    results = [None] * total
     claimed = set()
     registry = Registry(output_path)
+    lock = threading.Lock()            # guards covers, claimed, counters
+    state = {'finished': 0, 'next': 0, 'cancelled': False}
+    progress = {}                      # index -> 0..1 of the songs in flight
 
-    for i, item in enumerate(items):
+    def push_progress():
+        with lock:
+            vals = list(progress.values())
+        ui.set_progress(sum(vals) / len(vals) if vals else 0)
+
+    def finish(i, result):
+        with lock:
+            results[i] = result
+            state['finished'] += 1
+            n = state['finished']
+            progress.pop(i, None)
+        ui.set_overall(n, total)
+
+    def work(i, item, yt):
         _check_cancel(ui)
         n = i + 1
         item_label = f"{item['artist']} - {item['title']}"
         ui.set_track_state(i, 'active', '')
-        ui.set_progress(0)
+        redo = mode == 'redo'
 
         # Already downloaded earlier (this job or a previous one)?
-        known = registry.get(_item_key(item, ext))
+        known = None if redo else registry.get(_item_key(item, ext))
+        if known and upgrade and needs_upgrade(known, ext):
+            known = None
         if known:
-            results.append({'track': item, 'status': 'skipped', 'retry': None,
-                            'note': 'already in the folder'})
-            ui.set_track_state(i, 'skipped', 'already downloaded')
-            ui.set_overall(n, total)
-            continue
+            ui.set_track_state(i, 'skipped', 'already downloaded', path=known)
+            return finish(i, {'track': item, 'status': 'skipped',
+                              'retry': None, 'note': 'already in the folder'})
 
         ui.set_status(f'Finding {n}/{total}: {item_label}')
         t, why = resolve_item(yt, item, ui, total)
         if t is None:
-            results.append({'track': item, 'status': 'failed', 'retry': item,
-                            'note': why})
             ui.set_track_state(i, 'failed', why)
             ui.log(f'[{n}/{total}] {item_label}\n  x {why}', 'error')
-            ui.set_overall(n, total)
-            continue
-        known = registry.get(_item_key(t, ext))
+            return finish(i, {'track': item, 'status': 'failed',
+                              'retry': item, 'note': why})
+        known = None if redo else registry.get(_item_key(t, ext))
+        if known and upgrade and needs_upgrade(known, ext):
+            known = None
         if known:
             registry.add(_item_key(item, ext), known)
-            results.append({'track': t, 'status': 'skipped', 'retry': None,
-                            'note': 'already in the folder'})
-            ui.set_track_state(i, 'skipped', 'already downloaded')
-            ui.set_overall(n, total)
-            continue
+            ui.set_track_state(i, 'skipped', 'already downloaded', path=known)
+            return finish(i, {'track': t, 'status': 'skipped', 'retry': None,
+                              'note': 'already in the folder'})
 
         label = f"{t['artist']} - {t['title']}"
         ui.set_status(f'Downloading {n}/{total}: {label}')
         ui.log(f'[{n}/{total}] {label}', 'info')
 
         key = t.get('cover') or t['video_id']
-        if key not in covers:
+        with lock:
+            have_cover = key in covers
+        if not have_cover:
             found = get_cover(t)
-            if found and min(found[2]) >= 300:
+            with lock:
                 covers[key] = found
-            else:
-                if found:
-                    ui.log(f'  ! only a small cover found {found[2][0]}x'
-                           f'{found[2][1]}', 'warning')
-                else:
-                    ui.log('  ! no cover art could be downloaded', 'warning')
-                covers[key] = None if not found else found
-                if not found:
-                    pass
-        found = covers[key]
+            if found and min(found[2]) < 300:
+                ui.log(f'  ! only a small cover found {found[2][0]}x'
+                       f'{found[2][1]}', 'warning')
+            elif not found:
+                ui.log('  ! no cover art could be downloaded', 'warning')
+        with lock:
+            found = covers[key]
+            new_cover = bool(found) and found[1] != getattr(ui, '_last_cover',
+                                                            None)
+            if new_cover:
+                ui._last_cover = found[1]
         cover = found[0] if found else None
-        if found and found[1] != getattr(ui, '_last_cover', None):
+        if new_cover:
             ui.log(f'  cover art {found[2][0]}x{found[2][1]}', 'info')
-            ui._last_cover = found[1]
         ui.set_now(t, cover)
 
         folder = os.path.join(output_path, safe_name(t['album_artist']),
@@ -1077,37 +1135,49 @@ def download_tracks(items, yt, output_path, audio_format, ui):
         legacy = (os.path.join(folder, f"{int(t['track_number']):02d} - "
                                        f"{base}.{ext}")
                   if t['track_number'] else None)
-        if final in claimed:           # two songs with the same title
-            base = f"{base} ({t['track_number'] or n})"
-            final = os.path.join(folder, f'{base}.{ext}')
-        claimed.add(final)
-        if os.path.exists(final) or (legacy and os.path.exists(legacy)):
-            for k in (_item_key(item, ext), _item_key(t, ext)):
-                registry.add(k, final if os.path.exists(final) else legacy)
-            results.append({'track': t, 'status': 'skipped', 'retry': None,
-                            'note': 'already in the folder'})
-            ui.set_track_state(
-                i, 'skipped', 'already downloaded',
-                path=final if os.path.exists(final) else legacy)
-            ui.log('  = already downloaded', 'info')
-            ui.set_overall(n, total)
-            continue
-        os.makedirs(folder, exist_ok=True)
+        with lock:
+            if final in claimed:           # two songs with the same title
+                base = f"{base} ({t['track_number'] or n})"
+                final = os.path.join(folder, f'{base}.{ext}')
+            claimed.add(final)
+        on_disk = os.path.exists(final) or bool(legacy and
+                                                os.path.exists(legacy))
+        if on_disk and not redo:
+            where = final if os.path.exists(final) else legacy
+            if not (upgrade and needs_upgrade(where, ext)):
+                for k in (_item_key(item, ext), _item_key(t, ext)):
+                    registry.add(k, where)
+                ui.set_track_state(i, 'skipped', 'already downloaded',
+                                   path=where)
+                ui.log('  = already downloaded', 'info')
+                return finish(i, {'track': t, 'status': 'skipped',
+                                  'retry': None,
+                                  'note': 'already in the folder'})
+        # A redo (or upgrade) is built in a side folder and swapped in at the
+        # end, so a failed attempt never destroys the song you already have.
+        side = on_disk
+        work_dir = os.path.join(folder, f'.redo{i}') if side else folder
+        os.makedirs(work_dir, exist_ok=True)
+        work_final = os.path.join(work_dir, f'{base}.{ext}')
 
         def hook(d):
             _check_cancel(ui)
             if d.get('status') == 'downloading':
                 size = d.get('total_bytes') or d.get('total_bytes_estimate')
                 if size:
-                    ui.set_progress(d.get('downloaded_bytes', 0) / size)
+                    with lock:
+                        progress[i] = d.get('downloaded_bytes', 0) / size
+                    push_progress()
             elif d.get('status') == 'finished':
-                ui.set_progress(1)
+                with lock:
+                    progress[i] = 1
+                push_progress()
 
         def fetch(plan):
             """One download attempt. `plan` picks the YouTube player route."""
             opts = {
                 'format': selector,
-                'outtmpl': os.path.join(folder, base + '.%(ext)s'),
+                'outtmpl': os.path.join(work_dir, base + '.%(ext)s'),
                 'quiet': True, 'no_warnings': True, 'noprogress': True,
                 'noplaylist': True, 'retries': 3,
                 'logger': _QuietLogger(), 'progress_hooks': [hook],
@@ -1141,12 +1211,14 @@ def download_tracks(items, yt, output_path, audio_format, ui):
                     ui.set_track_state(
                         i, 'active', f'retry {attempt + 1} of '
                         f'{len(ATTEMPT_PLANS)}: {reason}')
-                    ui.set_progress(0)
+                    with lock:
+                        progress[i] = 0
+                    push_progress()
                     # Leftover partial files belong to the old download link.
                     for old in glob.glob(
-                            os.path.join(glob.escape(folder),
+                            os.path.join(glob.escape(work_dir),
                                          glob.escape(base) + '.*')):
-                        if old != final:
+                        if old != work_final:
                             try:
                                 os.remove(old)
                             except OSError:
@@ -1165,45 +1237,95 @@ def download_tracks(items, yt, output_path, audio_format, ui):
                     f"length {got:.0f}s vs expected "
                     f"{t['duration']:.0f}s (different version)")
                 ui.log(f'  ! {note}', 'warning')
+            out = work_final
             if ext == 'mp3':
                 ui.set_status(f'Converting {n}/{total} to MP3: {label}')
-                to_mp3(saved, final)
+                to_mp3(saved, work_final)
                 os.remove(saved)
             elif os.path.exists(saved):
-                final = saved
+                out = saved
             if cover:
                 # Also leave the cover as a picture in the album folder, so
                 # players show it even for formats that cannot embed art.
                 ext_img = 'png' if _is_png(cover) else 'jpg'
-                side = os.path.join(folder, f'cover.{ext_img}')
-                if not os.path.exists(side):
-                    with open(side, 'wb') as fh:
+                pic = os.path.join(folder, f'cover.{ext_img}')
+                if not os.path.exists(pic):
+                    with open(pic, 'wb') as fh:
                         fh.write(cover)
             try:
-                tag_file(final, t, cover)
+                tag_file(out, t, cover)
             except Exception as e:
                 note = (note + '; ' if note else '') + f'tagging failed: {e}'
                 ui.log(f'  ! tagging failed: {e}', 'warning')
+            if redo and item.get('replace_path') and os.path.splitext(
+                    item['replace_path'])[1] == os.path.splitext(out)[1]:
+                # a repair: put the new copy exactly where the broken one was
+                target = item['replace_path']
+                os.replace(out, target)
+                if side:
+                    shutil.rmtree(work_dir, ignore_errors=True)
+                out = target
+            elif side:                 # swap the finished song in
+                target = os.path.join(folder, os.path.basename(out))
+                os.replace(out, target)
+                shutil.rmtree(work_dir, ignore_errors=True)
+                out = target
             for k in (_item_key(item, ext), _item_key(t, ext)):
-                registry.add(k, final)
-            results.append({'track': t, 'status': 'done', 'note': note,
-                            'path': final, 'retry': None})
-            ui.set_track_state(i, 'done', '', path=final)
+                registry.add(k, out)
+            ui.set_track_state(i, 'done', '', path=out)
             ui.log('  + saved', 'success')
+            return finish(i, {'track': t, 'status': 'done', 'note': note,
+                              'path': out, 'retry': None})
         except Cancelled:
             ui.set_track_state(i, 'pending', '')
+            if side:
+                shutil.rmtree(work_dir, ignore_errors=True)
             raise
         except Exception as e:
             reason = _clean_error(e)
-            # Retry from the resolved song, so it is not searched for again.
-            results.append({'track': t, 'status': 'failed', 'note': reason,
-                            'retry': t})
+            if side:
+                shutil.rmtree(work_dir, ignore_errors=True)
             ui.set_track_state(i, 'failed', reason)
             ui.log(f'  x {reason}', 'error')
-        ui.set_overall(n, total)
+            # Retry from the resolved song, so it is not searched for again.
+            return finish(i, {'track': t, 'status': 'failed', 'note': reason,
+                              'retry': t})
 
+    def worker():
+        try:
+            from ytmusicapi import YTMusic
+            my_yt = YTMusic() if workers > 1 else yt
+        except Exception:
+            my_yt = yt
+        while not state['cancelled']:
+            with lock:
+                i = state['next']
+                if i >= total:
+                    return
+                state['next'] += 1
+            try:
+                work(i, items[i], my_yt)
+            except Cancelled:
+                state['cancelled'] = True
+                return
+            except Exception as e:                  # never lose the others
+                ui.log(f'  x unexpected error: {_clean_error(e)}', 'error')
+                finish(i, {'track': items[i], 'status': 'failed',
+                           'retry': items[i], 'note': _clean_error(e)})
+
+    if workers == 1:
+        worker()
+    else:
+        threads = [threading.Thread(target=worker, daemon=True)
+                   for _ in range(min(workers, total))]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
     ui.set_now(None, None)
-    return results
+    if state['cancelled']:
+        raise Cancelled()
+    return [r for r in results if r is not None]
 
 
 def make_report(title, link, audio_format, results, output_path,
@@ -1234,7 +1356,8 @@ def _save_failed(ui, title, link, results):
 
 
 def download(link, output_path, audio_format, ui, retry_path=None,
-             picked=None, picked_title=''):
+             picked=None, picked_title='', workers=1, mode='fill',
+             upgrade=False):
     """Entry point. `link` is a URL or an artist name. With `retry_path`, only
     the songs saved there by an earlier job (the failed ones) are attempted.
     With `picked`, exactly those songs (chosen on the search screen) are
@@ -1288,8 +1411,13 @@ def download(link, output_path, audio_format, ui, retry_path=None,
             ui.set_status('Nothing found')
             return
         log(f'Found {len(items)} song(s).', 'success')
+        getattr(ui, 'set_job_title', lambda t: None)(title)
 
-        results = download_tracks(items, yt, output_path, audio_format, ui)
+        if mode == 'redo':
+            log('Downloading everything again; your current files are only '
+                'replaced when the new copy is complete.', 'info')
+        results = download_tracks(items, yt, output_path, audio_format, ui,
+                                  workers=workers, mode=mode, upgrade=upgrade)
 
         done = sum(r['status'] == 'done' for r in results)
         skipped = sum(r['status'] == 'skipped' for r in results)

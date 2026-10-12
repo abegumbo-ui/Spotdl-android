@@ -38,7 +38,7 @@ Window.clearcolor = K.C(K.BG)
 
 FOLDER_NAME = 'SpotDL Downloader'
 MAX_LOG_LINES = 300
-GO_LABEL = 'Download'
+GO_LABEL = 'Search'
 IDLE_TITLE = 'Nothing downloading'
 
 # state -> (label, colour)
@@ -139,11 +139,15 @@ class SpotDLLayout(BoxLayout):
         lib_btn.label.font_size = sp(12)
         lib_btn.bind(on_release=self.open_library)
         head.add_widget(lib_btn)
+        gear = K.IconBtn('gear', bg=K.SURFACE, size=40, icon_scale=.55,
+                         pos_hint={'center_y': .5})
+        gear.bind(on_release=self.open_settings)
+        head.add_widget(gear)
         self.add_widget(head)
 
         # link box with a paste shortcut
         box, self.link_input = K.make_input(
-            'Paste a link or type an artist name', 'search', on_enter=self.on_go)
+            'Search, or paste a link', 'search', on_enter=self.on_go)
         paste = K.Btn('Paste', bg=K.SURFACE, fg=K.MUTED, radius=10)
         paste.size_hint = (None, None)
         paste.size = (dp(66), dp(36))
@@ -157,12 +161,9 @@ class SpotDLLayout(BoxLayout):
         self.add_widget(self.format_spinner)
 
         row = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(10))
-        self.search_btn = K.Btn('Search', icon='search', size_hint_x=0.42)
-        self.search_btn.bind(on_release=self.open_search)
-        self.go_btn = K.Btn(GO_LABEL, icon='download', bg=K.ACCENT,
+        self.go_btn = K.Btn(GO_LABEL, icon='search', bg=K.ACCENT,
                             fg=K.ON_ACCENT, size=15)
         self.go_btn.bind(on_release=self.on_go)
-        row.add_widget(self.search_btn)
         row.add_widget(self.go_btn)
         self.add_widget(row)
 
@@ -251,7 +252,7 @@ class SpotDLLayout(BoxLayout):
     def _set_go(self, running):
         """The main button is Download, or Cancel while a job runs."""
         self.go_btn.text = 'Cancel' if running else GO_LABEL
-        self.go_btn.icon.kind = 'close' if running else 'download'
+        self.go_btn.icon.kind = 'close' if running else 'search'
         self.go_btn.icon._draw()
         self.go_btn.set_style(bg=K.DANGER if running else K.ACCENT,
                               fg='#2B0509' if running else K.ON_ACCENT)
@@ -541,11 +542,7 @@ class SpotDLLayout(BoxLayout):
             open(self.p['cancel'], 'w').close()
             self.set_status('Cancelling...')
             return
-        link = self.link_input.text.strip()
-        if not link:
-            self.set_status('Paste a link first.')
-            return
-        self._begin_job({'link': link})
+        self.open_search()
 
     def get_library(self):
         if not self.output_path:
@@ -570,14 +567,92 @@ class SpotDLLayout(BoxLayout):
                             'it to finish before starting another.')
             return
         import search_screen
+        text = self.link_input.text.strip()
         search_screen.SearchScreen(
-            on_download=self._download_picked,
-            initial=self.link_input.text.strip()
-            if not self.link_input.text.startswith('http') else '').open()
+            on_download=self._download_picked, initial=text,
+            on_download_link=self._download_link, auto=bool(text)).open()
+
+    # ---- settings, history and "you already have this" choices
+    def open_settings(self, *args):
+        import settings_screen
+        settings_screen.SettingsScreen(
+            App.get_running_app().user_data_dir, self.get_library,
+            on_redo=self._redo_items, on_history=self.open_history).open()
+
+    def open_history(self, *args):
+        import history_screen
+        history_screen.HistoryScreen(
+            App.get_running_app().user_data_dir, self._run_again).open()
+
+    def _busy_note(self):
+        if self.running:
+            self.set_status('A download is running. Cancel it or wait for '
+                            'it to finish first.')
+        return self.running
+
+    def _run_again(self, spec, mode):
+        if not self._busy_note():
+            self._begin_job(dict(spec, mode=mode))
+
+    def _redo_items(self, items, title):
+        if not self._busy_note():
+            self._begin_job({'items': items, 'title': title, 'mode': 'redo'})
+
+    def _failed_for(self, title='', link=''):
+        """Is the last job's failed list the one for this download?"""
+        try:
+            with open(self.p['failed']) as f:
+                saved = json.load(f)
+        except Exception:
+            return False
+        return bool(saved.get('items')) and (
+            (link and saved.get('link') == link) or
+            (title and saved.get('title') == title))
+
+    def _choose(self, have, total, spec, title='', link=''):
+        """Something already (partly) downloaded was asked for again: let the
+        user pick what to do."""
+        from sheets import ActionSheet
+        missing = max(0, total - have)
+        acts = [(f'Fill the gaps ({missing} missing)' if missing
+                 else 'Fill the gaps (nothing is missing)', 'download',
+                 lambda: self._begin_job(dict(spec)), None)]
+        if self._failed_for(title, link):
+            acts.append(('Redo failed songs only', 'retry',
+                         lambda: self._begin_job({'retry': True}), K.WARN))
+        acts.append(('Redo everything', 'retry',
+                     lambda: self._begin_job(dict(spec, mode='redo')),
+                     K.DANGER))
+        ActionSheet('You already have some of this',
+                    acts, subtitle=f'{have} of {total} songs are downloaded'
+                    ).open()
+
+    def _download_link(self, link):
+        """Download a whole link (a playlist) after the search card."""
+        import history
+        old = history.find_link(App.get_running_app().user_data_dir, link)
+        if old:
+            c = old['counts']
+            have = c['done'] + c['skipped']
+            self._choose(have, have + c['failed'], {'link': link}, link=link)
+        else:
+            self._begin_job({'link': link})
 
     def _download_picked(self, items, title):
         """Download the songs chosen on the search screen."""
-        self._begin_job({'items': items, 'title': title})
+        from spotdl_bridge import FORMATS, Registry, _item_key
+        spec = {'items': items, 'title': title}
+        try:
+            self.prepare_folder()
+            ext = FORMATS.get(self.format_spinner.text, FORMATS['m4a'])[1]
+            reg = Registry(self.output_path)
+            have = sum(1 for i in items if reg.get(_item_key(i, ext)))
+        except Exception:
+            have = 0
+        if have:
+            self._choose(have, len(items), spec, title=title)
+        else:
+            self._begin_job(spec)
 
     def on_retry(self, *args):
         """Download again only the songs that failed in the last job."""
@@ -585,6 +660,8 @@ class SpotDLLayout(BoxLayout):
             self._begin_job({'retry': True})
 
     def _begin_job(self, extra):
+        if self._busy_note():
+            return
         self.prepare_folder()
         # Clear the screen for the new job
         self.track_bar.value = 0

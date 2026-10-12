@@ -21,9 +21,16 @@ release on, updates install over the top.
 - Titles in Hebrew, Spanish, Russian, Greek, Arabic and more show their real letters
 - Play button on every search result to check you have the right song, and a song
   card (tap the title) with cover, artist, album, length and the song that would download
-- **New in 1.8:** a Library for everything you downloaded (songs, albums, artists,
+- 1.8: a Library for everything you downloaded (songs, albums, artists,
   playlists, favorites, search and sorting), a queue with Play next / Add to queue,
   a full Now Playing screen with shuffle, repeat and a sleep timer, and the Android
   back button
+- **New in 1.9:**
+  - One search bar for words and links, with a top result, songs, artists and albums
+  - YouTube Music-style artist and album pages: play, shuffle, queue, download all
+  - Search is much faster (both services at once; Spotify is skipped if it is slow)
+  - Up to 5 songs download at the same time (Settings)
+  - Settings screen; yt-dlp updates are checked at most once a day, or on demand
+  - Past downloads with Fill gaps / Redo all, a safe redo, and a broken-song scan
 
 For 64-bit Android phones (Android 7.0 and newer).
