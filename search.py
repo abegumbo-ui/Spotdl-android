@@ -502,8 +502,9 @@ _YT_HOST = re.compile(r'(?:music\.)?youtube\.com|youtu\.be', re.I)
 
 
 def is_link(text):
+    """A pasted link, or an address typed in (with or without https://)."""
     t = text.strip()
-    return bool(re.match(r'https?://', t, re.I) or
+    return bool(b.looks_like_address(t) or re.match(r'https?://', t, re.I) or
                 re.match(r'(?:www\.|music\.)?(?:youtube\.com|youtu\.be)/', t, re.I)
                 or re.match(r'open\.spotify\.com/', t, re.I))
 
@@ -524,15 +525,24 @@ def link_card(searcher, text, log=lambda *a, **k: None):
        album    {'card': album card}
        artist   {'card': artist card}
        playlist {'title', 'count', 'thumb', 'link'}
+       web      {'title', 'items', 'count', 'thumb', 'site'}  (any website)
     Raises ValueError with a readable message when it cannot tell."""
-    text = text.strip()
+    typed = text.strip()
+    text = typed
     if not re.match(r'https?://', text, re.I):
         text = 'https://' + text
     m = b._SPOTIFY.search(text)
     if m:
         return _spotify_link(searcher, text, m.group(1), m.group(2), log)
     if not _YT_HOST.search(text):
-        raise ValueError('That is not a YouTube, YouTube Music or Spotify link.')
+        items, title = b.tracks_from_web(typed, log)      # any other website
+        site = items[0].get('album') if items else ''
+        return {'kind': 'web', 'title': title, 'items': items, 'site': site,
+                'count': len(items), 'link': typed,
+                'thumb': next((i.get('cover_raw') for i in items
+                               if i.get('cover_raw')), None),
+                'duration': items[0].get('duration') if len(items) == 1
+                else None}
     yt = searcher.yt
     m = re.search(r'/browse/(MPRE[\w-]+)', text)
     if m:

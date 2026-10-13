@@ -241,9 +241,42 @@ class SearchScreen(ModalView):
             g.add_widget(self._song_row(card))
         elif kind in ('artist', 'album'):
             g.add_widget(self._top_card(info['card']))
+        elif kind == 'web':                    # audio found on a web page
+            row = K.Surface(bg=K.SURFACE, radius=18, size_hint_y=None,
+                            height=dp(212), padding=dp(14), spacing=dp(10),
+                            orientation='vertical')
+            top = BoxLayout(size_hint_y=None, height=dp(84), spacing=dp(14))
+            cov = K.Cover(radius=14, size_hint=(None, None),
+                          size=(dp(84), dp(84)))
+            ThumbLoader.load(info.get('thumb'), cov)
+            top.add_widget(cov)
+            col = BoxLayout(orientation='vertical')
+            t = _label(rich(info['title']), 15, K.TEXT, bold=True,
+                       valign='top')
+            col.add_widget(t)
+            n = info['count']
+            bits = ['Web page', info.get('site') or '']
+            if n > 1:
+                bits.append(f'{n} items')
+            elif info.get('duration'):
+                bits.append(srch._fmt(info['duration']))
+            col.add_widget(_label(rich('  -  '.join(x for x in bits if x)),
+                                  11.5, K.MUTED, height=22))
+            top.add_widget(col)
+            row.add_widget(top)
+            row.add_widget(_label(
+                'Only the audio is saved (as ' + 'the format selected on the '
+                'main screen, or MP3 when the page only has video).', 10.5,
+                K.FAINT, height=30, valign='top'))
+            go = K.Btn('Download the audio', icon='download', bg=K.ACCENT,
+                       fg=K.ON_ACCENT, size=14, size_hint_y=None,
+                       height=dp(44))
+            go.bind(on_release=lambda *a: self._download_web(info))
+            row.add_widget(go)
+            g.add_widget(row)
         else:                                  # a playlist
             row = K.Surface(bg=K.SURFACE, radius=18, size_hint_y=None,
-                            height=dp(150), padding=dp(14), spacing=dp(14),
+                            height=dp(176), padding=dp(14), spacing=dp(10),
                             orientation='vertical')
             top = BoxLayout(size_hint_y=None, height=dp(84), spacing=dp(14))
             cov = K.Cover(radius=14, size_hint=(None, None),
@@ -263,6 +296,10 @@ class SearchScreen(ModalView):
             go.bind(on_release=lambda *a: self._download_link(info['link']))
             row.add_widget(go)
             g.add_widget(row)
+
+    def _download_web(self, info):
+        self.dismiss()
+        self.on_download(info['items'], info['title'])
 
     def _download_link(self, link):
         self.dismiss()

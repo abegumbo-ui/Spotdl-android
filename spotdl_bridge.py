@@ -15,6 +15,7 @@ The `ui` object provides (all safe to call from this thread):
   set_now(track, cover_bytes)  set_report(path)  cancel_requested
 """
 import glob
+import hashlib
 import json
 import os
 import re
@@ -141,6 +142,8 @@ def cover_candidates(t):
     for u in (t.get('cover'), t.get('cover_raw')):
         if u and u not in urls:
             urls.append(u)
+    if t.get('web'):
+        return urls
     vid = t['video_id']
     urls += [f'https://i.ytimg.com/vi/{vid}/maxresdefault.jpg',
              f'https://i.ytimg.com/vi/{vid}/hqdefault.jpg']
@@ -494,6 +497,129 @@ def tracks_from_youtube_url(yt, url, log):
         t = track_from_video_id(yt, m.group(1))
         return [t], ''
     return [], ''
+
+
+# --------------------------------------------------------------------------
+# Any website: a page with audio or video on it (yt-dlp knows many sites, and
+# can find a plain media player inside an ordinary page)
+# --------------------------------------------------------------------------
+_ADDRESS = re.compile(
+    r'^(?:https?://)?(?:(?:[\w-]+\.)+[a-z]{2,24}|\d{1,3}(?:\.\d{1,3}){3})'
+    r'(?::\d+)?(?:[/?#]\S*)?$', re.I)
+_YT_HOSTS = re.compile(r'(?:^|//|\.)(?:music\.)?youtube\.com|youtu\.be', re.I)
+
+
+def looks_like_address(text):
+    """True for something typed like a web address, with or without
+    https:// (a sentence or a song title with spaces is not one)."""
+    t = text.strip()
+    return bool(t) and ' ' not in t and bool(_ADDRESS.match(t))
+
+
+def full_address(text):
+    t = text.strip()
+    return t if re.match(r'https?://', t, re.I) else 'https://' + t
+
+
+def is_youtube_address(text):
+    return bool(_YT_HOSTS.search(text))
+
+
+def _web_error(e):
+    msg = _clean_error(e)
+    if 'Unsupported URL' in msg or 'No video formats' in msg or \
+            'no video' in msg.lower():
+        return ("No audio or video found on that page. It may need a login, "
+                "use copy protection, or build its player in a way this app "
+                "can't read.")
+    return msg
+
+
+def _web_item(info, album, site, number, total, page_url):
+    thumbs = info.get('thumbnails') or []
+    cover = info.get('thumbnail') or (thumbs[-1].get('url') if thumbs else None)
+    url = info.get('webpage_url') or info.get('url') or page_url
+    vid = 'web:' + hashlib.md5(url.encode('utf-8')).hexdigest()[:14]
+    artist = (info.get('artist') or info.get('uploader') or info.get('channel')
+              or site)
+    title = re.sub(r'\s*\(1\)$', '', info.get('title') or url) \
+        if not number else (info.get('title') or url)
+    t = _track(vid, title, artist, album or site, number=number, total=total,
+               cover=cover, duration=info.get('duration'))
+    t['web'] = True
+    t['web_url'] = url
+    return t
+
+
+def _site_name(info, url):
+    """A readable name for where this came from: the site's own name when
+    yt-dlp knows the site, otherwise the web address."""
+    host = re.sub(r'^www\.', '', re.sub(r'^https?://', '', url).split('/')[0])
+    key = info.get('extractor_key') or ''
+    generic = ('Generic', 'HTML5MediaEmbed', 'Embed', 'Html5')
+    if key and not any(g.lower() in key.lower() for g in generic):
+        return re.sub(r'([a-z])([A-Z])', r'\1 \2', key)
+    return host
+
+
+def tracks_from_web(url, log=lambda *a, **k: None):
+    """Songs / clips found at a web address. Returns (items, title).
+    Only audio is ever kept; see download_tracks."""
+    import yt_dlp
+    typed = url.strip()
+    url = full_address(url)
+    opts = {'quiet': True, 'no_warnings': True, 'socket_timeout': 20,
+            'extract_flat': 'in_playlist', 'logger': _QuietLogger(),
+            'noplaylist': False}
+    try:
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except Exception as e:
+            # An address typed without https:// that has no secure version
+            # gets one more try over plain http.
+            if not re.match(r'https?://', typed, re.I) and \
+                    re.search(r'SSL|certificate|Connection refused|'
+                              r'timed out', str(e), re.I):
+                url = 'http://' + typed
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+            else:
+                raise
+    except Exception as e:
+        raise ValueError(_web_error(e))
+    if not info:
+        raise ValueError(_web_error('Unsupported URL'))
+    site = _site_name(info, url)
+    entries = [e for e in (info.get('entries') or []) if e]
+    if len(entries) > 1:
+        album = info.get('title') or site
+        items = [_web_item(e, album, site, n, len(entries), url)
+                 for n, e in enumerate(entries, 1)]
+        for it, e in zip(items, entries):          # entries carry their own page
+            it['web_url'] = e.get('webpage_url') or e.get('url') or url
+        return items, album
+    one = entries[0] if entries else info          # a page with one clip
+    if entries and not one.get('title') and info.get('title'):
+        one = dict(one, title=info['title'])
+    item = _web_item(one, site, site, 0, 0, url)
+    if entries:
+        item['web_url'] = one.get('webpage_url') or one.get('url') or url
+    return [item], item['title']
+
+
+def _has_video(path):
+    """Does this downloaded file carry a picture track? (Probed with the app's
+    own FFmpeg; if that is not possible, judged by the file type.)"""
+    try:
+        import av
+        with av.open(path) as c:
+            return any(getattr(st.codec_context, 'name', '') not in
+                       ('mjpeg', 'png')       # embedded cover pictures
+                       for st in c.streams if st.type == 'video')
+    except Exception:
+        return os.path.splitext(path)[1].lower().lstrip('.') in (
+            'mp4', 'mkv', 'mov', 'avi', 'ts', 'm4v', 'flv', 'wmv')
 
 
 # --------------------------------------------------------------------------
@@ -963,6 +1089,8 @@ def resolve_item(yt, item, ui, total):
 
     Returns (track, None), or (None, reason) when it cannot be downloaded.
     """
+    if item.get('web'):                      # from a website: nothing to match
+        return item, None
     if item.get('pending'):                  # a Spotify entry: find it first
         try:
             r, off = find_song(yt, item['title'], item['artist'],
@@ -1075,7 +1203,8 @@ def download_tracks(items, yt, output_path, audio_format, ui, workers=1,
 
         # Already downloaded earlier (this job or a previous one)?
         known = None if redo else registry.get(_item_key(item, ext))
-        if known and upgrade and needs_upgrade(known, ext):
+        if known and upgrade and not item.get('web') and \
+                needs_upgrade(known, ext):
             known = None
         if known:
             ui.set_track_state(i, 'skipped', 'already downloaded', path=known)
@@ -1090,7 +1219,8 @@ def download_tracks(items, yt, output_path, audio_format, ui, workers=1,
             return finish(i, {'track': item, 'status': 'failed',
                               'retry': item, 'note': why})
         known = None if redo else registry.get(_item_key(t, ext))
-        if known and upgrade and needs_upgrade(known, ext):
+        if known and upgrade and not item.get('web') and \
+                needs_upgrade(known, ext):
             known = None
         if known:
             registry.add(_item_key(item, ext), known)
@@ -1144,7 +1274,8 @@ def download_tracks(items, yt, output_path, audio_format, ui, workers=1,
                                                 os.path.exists(legacy))
         if on_disk and not redo:
             where = final if os.path.exists(final) else legacy
-            if not (upgrade and needs_upgrade(where, ext)):
+            if not (upgrade and not t.get('web') and
+                    needs_upgrade(where, ext)):
                 for k in (_item_key(item, ext), _item_key(t, ext)):
                     registry.add(k, where)
                 ui.set_track_state(i, 'skipped', 'already downloaded',
@@ -1175,18 +1306,20 @@ def download_tracks(items, yt, output_path, audio_format, ui, workers=1,
 
         def fetch(plan):
             """One download attempt. `plan` picks the YouTube player route."""
+            is_web = bool(t.get('web'))
             opts = {
-                'format': selector,
+                'format': 'bestaudio/best' if is_web else selector,
                 'outtmpl': os.path.join(work_dir, base + '.%(ext)s'),
                 'quiet': True, 'no_warnings': True, 'noprogress': True,
                 'noplaylist': True, 'retries': 3,
                 'logger': _QuietLogger(), 'progress_hooks': [hook],
             }
-            if plan:
+            if plan and not is_web:
                 opts['extractor_args'] = {'youtube': {'player_client': plan}}
             with yt_dlp.YoutubeDL(opts) as ydl:
                 # YouTube Music address of the audio track; audio-only format.
                 info = ydl.extract_info(
+                    t['web_url'] if is_web else
                     f"https://music.youtube.com/watch?v={t['video_id']}",
                     download=True)
                 return info, ydl.prepare_filename(info)
@@ -1232,16 +1365,30 @@ def download_tracks(items, yt, output_path, audio_format, ui, workers=1,
             got = info.get('duration')
             # A second or two either way is normal (Spotify and YouTube trim
             # silence differently) and is not worth mentioning.
-            if t.get('duration') and got and abs(got - t['duration']) > 5:
+            if not t.get('web') and t.get('duration') and got and \
+                    abs(got - t['duration']) > 5:
                 note = (note + '; ' if note else '') + (
                     f"length {got:.0f}s vs expected "
                     f"{t['duration']:.0f}s (different version)")
                 ui.log(f'  ! {note}', 'warning')
             out = work_final
-            if ext == 'mp3':
-                ui.set_status(f'Converting {n}/{total} to MP3: {label}')
-                to_mp3(saved, work_final)
-                os.remove(saved)
+            # A page's file may carry a picture track too. Only the sound is
+            # kept: such a file is always converted to MP3 (which drops it).
+            has_video = bool(t.get('web')) and (
+                info.get('vcodec') not in (None, 'none')
+                or _has_video(saved))
+            if ext == 'mp3' or has_video:
+                out = os.path.join(work_dir, f'{base}.mp3')
+                if saved.lower().endswith('.mp3') and not has_video:
+                    out = saved
+                else:
+                    ui.set_status(f'Converting {n}/{total} to MP3: {label}')
+                    to_mp3(saved, out)
+                    if os.path.abspath(saved) != os.path.abspath(out):
+                        os.remove(saved)
+                if has_video and ext != 'mp3':
+                    note = (note + '; ' if note else '') + \
+                        'page had video; its audio was saved as MP3'
             elif os.path.exists(saved):
                 out = saved
             if cover:
@@ -1399,9 +1546,15 @@ def download(link, output_path, audio_format, ui, retry_path=None,
         elif _SPOTIFY.search(link):
             ui.set_status('Reading Spotify link...')
             items, title = spotify_items(link, log)
-        elif re.match(r'https?://', link):
+        elif (re.match(r'https?://', link) or looks_like_address(link)) \
+                and not is_youtube_address(link):
+            ui.set_status('Reading the web page...')
+            items, title = tracks_from_web(link, log)
+            log(f'Web page: {title}. Only the audio is saved.', 'info')
+        elif re.match(r'https?://', link) or is_youtube_address(link):
             ui.set_status('Reading link...')
-            items, title = tracks_from_youtube_url(yt, link, log)
+            items, title = tracks_from_youtube_url(
+                yt, full_address(link), log)
         else:
             ui.set_status(f"Searching for artist '{link}'...")
             items, title = tracks_from_artist_name(yt, link, log)

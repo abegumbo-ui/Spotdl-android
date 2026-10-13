@@ -36,6 +36,19 @@ Type in the box on the main screen (or paste a link) and press **Search**.
 - If Spotify can't be reached it is skipped after a few seconds (and left alone
   for 5 minutes), and YouTube Music results are still shown.
 
+## Any website
+
+Type or paste the address of a web page that has audio or video on it, with or
+without `https://` (for example `example.com/some-page.html`). The app looks for
+the media on the page (many sites such as SoundCloud and Bandcamp work, and plain
+pages with a built-in player often do) and shows a card; **Download the audio**
+saves it. Only the sound is kept: if the page only has video, its audio is saved
+as an MP3. Titles and pictures come from the page, not YouTube Music.
+
+It cannot get audio from copy-protected services (Spotify, Apple Music, Netflix,
+Tidal), from pages that need a login, or from players it cannot read; the card
+says so instead of failing silently.
+
 ## Faster downloads
 
 Up to 5 songs download at the same time (Settings, default 3). Songs finish
