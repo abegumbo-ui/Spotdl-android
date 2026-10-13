@@ -14,9 +14,13 @@ The `ui` object provides (all safe to call from this thread):
   set_queue(tracks)  set_track_state(index, state, note)
   set_now(track, cover_bytes)  set_report(path)  cancel_requested
 """
+import glob
+import hashlib
 import json
 import os
 import re
+import shutil
+import threading
 import time
 import traceback
 
@@ -31,10 +35,15 @@ FORMATS = {
 MP3_BITRATE = 192000
 DURATION_TOLERANCE = 1.5  # seconds; Spotify/YouTube round differently, but a
 #                           2s gap means a genuinely different cut
+# Each song gets three tries. Every try asks YouTube Music for a fresh download
+# address (the old one may have expired or been refused with 403 Forbidden);
+# the second try uses a different player route than the first and third.
+ATTEMPT_PLANS = [None, ['android_vr'], None]
 AUDIO_TRACK = 'MUSIC_VIDEO_TYPE_ATV'  # YouTube Music's "song" (audio) type
 
 _BAD_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
-_YT_ID = re.compile(r'(?:v=|youtu\.be/|/shorts/)([\w-]{11})')
+_YT_ID = re.compile(r'(?:[?&]v=|youtu\.be/|/shorts/|/embed/|/live/|/v/)([\w-]{11})')
+_CHANNEL = re.compile(r'youtube\.com/(?:@[^/?#\s]+|c/[^/?#\s]+|user/[^/?#\s]+)')
 _SPOTIFY = re.compile(
     r'open\.spotify\.com/(?:intl-[a-z]+/)?(track|album|playlist|artist)/(\w+)')
 _ANSI = re.compile(r'\x1b\[[0-9;]*m')
@@ -133,6 +142,8 @@ def cover_candidates(t):
     for u in (t.get('cover'), t.get('cover_raw')):
         if u and u not in urls:
             urls.append(u)
+    if t.get('web'):
+        return urls
     vid = t['video_id']
     urls += [f'https://i.ytimg.com/vi/{vid}/maxresdefault.jpg',
              f'https://i.ytimg.com/vi/{vid}/hqdefault.jpg']
@@ -297,15 +308,72 @@ def find_song(yt, title, artist, duration, require_title=True):
     return _pick_version(res, duration)
 
 
+_NOISE = re.compile(
+    r'[\(\[][^\)\]]*?(official|video|audio|lyric|visuali[sz]er|hd|hq|4k|'
+    r'remaster|music video|clip)[^\)\]]*?[\)\]]', re.I)
+
+
+def _tokens(text):
+    return set(_norm(text).split())
+
+
+def _overlap(a, b):
+    a, b = _tokens(a), _tokens(b)
+    return len(a & b) / len(a | b) if a and b else 0.0
+
+
+def split_video_title(title, channel):
+    """('Artist', 'Song') from a typical upload title such as
+    'Artist - Song (Official Video)' on a channel called 'ArtistVEVO'."""
+    title = _NOISE.sub('', title or '').strip()
+    channel = re.sub(r'(?i)\s*(-\s*topic|vevo|official)\s*$', '', channel or '').strip()
+    if ' - ' in title:
+        artist, song = title.split(' - ', 1)
+        return artist.strip(), song.strip()
+    return channel, title
+
+
+def match_video_to_song(yt, title, channel, duration):
+    """Find the YouTube Music *song* that a normal video is the same track as.
+
+    Compares title, artist and length, so the right version is chosen rather
+    than the first search result. Returns a search result or None.
+    """
+    artist, song = split_video_title(title, channel)
+    seen, results = set(), []
+    for q in dict.fromkeys([f'{artist} {song}', f'{song} {artist}', song]):
+        if not q.strip():
+            continue
+        try:
+            found = yt.search(q, filter='songs', limit=8)
+        except Exception:
+            continue
+        for r in found:
+            if r.get('videoId') and r['videoId'] not in seen:
+                seen.add(r['videoId'])
+                results.append(r)
+    best, best_score = None, 0.0
+    for r in results:
+        sim = max(_overlap(song, r.get('title')), _overlap(title, r.get('title')))
+        art = _overlap(artist, _names(r.get('artists')))
+        d = r.get('duration_seconds')
+        dur_ok = bool(duration and d and abs(d - duration) <= 4)
+        ok = (sim >= 0.5 and (art > 0 or dur_ok)) or (dur_ok and sim >= 0.3)
+        score = sim * 2 + art + (1 if dur_ok else 0)
+        if ok and score > best_score:
+            best, best_score = r, score
+    return best
+
+
 def to_audio_track(yt, t):
     """Make sure a track points at a YouTube Music audio track, not a video.
 
-    Returns the track, or None when only a video exists.
+    Returns the track, or None when no audio version can be found.
     """
     if t.get('video_type') in (None, AUDIO_TRACK):
         return t
-    best, off = find_song(yt, t['title'], t['artist'], t.get('duration'))
-    if not best or (off is not None and off > DURATION_TOLERANCE):
+    best = match_video_to_song(yt, t['title'], t['artist'], t.get('duration'))
+    if not best:
         return None
     fixed = _song_to_track(yt, best, t, cover=t.get('cover'),
                            duration=t.get('duration'))
@@ -315,30 +383,89 @@ def to_audio_track(yt, t):
     return fixed
 
 
-def track_from_video_id(yt, vid):
-    """Metadata for one pasted video/song id, converted to its audio track."""
-    wp = yt.get_watch_playlist(vid, limit=1)
-    item = (wp.get('tracks') or [{}])[0]
-    if item.get('videoType') not in (None, AUDIO_TRACK):
-        counterpart = item.get('counterpart')
-        if counterpart and counterpart.get('videoId'):
-            item = counterpart
-        else:
-            raise ValueError(
-                'That link is a video, and no YouTube Music audio version of '
-                'it exists, so nothing was downloaded.')
-    album = item.get('album') or {}
-    length = item.get('length') or ''
+def _seconds(length):
     secs = None
-    if ':' in length:
+    if ':' in (length or ''):
         secs = 0
         for part in length.split(':'):
             secs = secs * 60 + int(part)
+    return secs
+
+
+def track_from_video_id(yt, vid):
+    """Any YouTube / YouTube Music video link -> its YouTube Music audio track."""
+    item = None
+    try:
+        item = (yt.get_watch_playlist(vid, limit=1).get('tracks') or [None])[0]
+    except Exception:
+        pass
+    if item and item.get('videoType') in (None, AUDIO_TRACK):
+        pass                                     # already a YouTube Music song
+    elif item and (item.get('counterpart') or {}).get('videoId'):
+        item = item['counterpart']               # music video -> its audio
+    else:
+        # An ordinary upload (or a video YouTube Music has no page for): find
+        # the same song in the YouTube Music catalogue by title/artist/length.
+        title = channel = ''
+        duration = None
+        if item:
+            title = item.get('title') or ''
+            channel = _names(item.get('artists'))
+            duration = _seconds(item.get('length'))
+        if not title:
+            details = yt.get_song(vid).get('videoDetails') or {}
+            title, channel = details.get('title') or '', details.get('author') or ''
+            duration = int(details['lengthSeconds']) \
+                if details.get('lengthSeconds') else None
+        best = match_video_to_song(yt, title, channel, duration)
+        if not best:
+            raise ValueError(
+                f'"{title or vid}" is an ordinary video and no matching song '
+                'was found on YouTube Music, so nothing was downloaded.')
+        return _song_to_track(
+            yt, best, {'title': title, 'artist': channel, 'album': ''},
+            duration=duration)
+    album = item.get('album') or {}
     return _track(
         item.get('videoId') or vid, item.get('title'),
         _names(item.get('artists')), album.get('name') or '',
         cover=album_cover(yt, album) or _thumb(item.get('thumbnail') or []),
-        duration=secs, video_type=AUDIO_TRACK)
+        duration=_seconds(item.get('length')), video_type=AUDIO_TRACK)
+
+
+def youtube_page_name(url):
+    """The channel's display name, read from its public YouTube page."""
+    import requests
+    r = requests.get(url, timeout=20, cookies={'CONSENT': 'YES+1'},
+                     headers={'User-Agent': 'Mozilla/5.0',
+                              'Accept-Language': 'en-US,en;q=0.9'})
+    r.raise_for_status()
+    m = (re.search(r'<meta property="og:title" content="([^"]+)"', r.text)
+         or re.search(r'<title>([^<]+)</title>', r.text))
+    if not m:
+        return ''
+    import html
+    name = html.unescape(m.group(1))
+    return re.sub(r'(?i)\s*-\s*(youtube|topic)\s*$', '', name).strip()
+
+
+def tracks_from_channel_url(yt, url, log):
+    """Artist/channel link (YouTube Music or YouTube, any address style)."""
+    m = re.search(r'/(?:channel|browse)/(UC[\w-]{20,})', url)
+    if m:
+        try:
+            tracks, name = tracks_from_artist(yt, m.group(1), log)
+            if tracks:
+                return tracks, name
+        except Exception as e:
+            log(f'  Not a YouTube Music artist page ({_clean_error(e)}); '
+                'looking the artist up by name instead.', 'info')
+    name = youtube_page_name(url if url.startswith('http') else 'https://' + url)
+    if not name:
+        raise ValueError("Couldn't read this channel's name from YouTube. "
+                         'Type the artist name instead.')
+    log(f'Channel: {name}', 'info')
+    return tracks_from_artist_name(yt, name, log)
 
 
 def tracks_from_youtube_url(yt, url, log):
@@ -347,9 +474,8 @@ def tracks_from_youtube_url(yt, url, log):
     if m:
         tracks = tracks_from_album(yt, m.group(1))
         return tracks, tracks[0]['album'] if tracks else ''
-    m = re.search(r'/(?:channel|browse)/(UC[\w-]{20,})', url)   # artist
-    if m:
-        return tracks_from_artist(yt, m.group(1), log)
+    if re.search(r'/(?:channel|browse)/UC[\w-]{20,}', url) or _CHANNEL.search(url):
+        return tracks_from_channel_url(yt, url, log)  # artist / channel page
     m = re.search(r'[?&]list=([\w-]+)', url)          # playlist / OLAK album
     if m and ('watch?v=' not in url or 'playlist' in url):
         pl = yt.get_playlist(m.group(1), limit=None)
@@ -374,6 +500,136 @@ def tracks_from_youtube_url(yt, url, log):
 
 
 # --------------------------------------------------------------------------
+# Any website: a page with audio or video on it (yt-dlp knows many sites, and
+# can find a plain media player inside an ordinary page)
+# --------------------------------------------------------------------------
+_ADDRESS = re.compile(
+    r'^(?:https?://)?(?:(?:[\w-]+\.)+[a-z]{2,24}|\d{1,3}(?:\.\d{1,3}){3})'
+    r'(?::\d+)?(?:[/?#]\S*)?$', re.I)
+_YT_HOSTS = re.compile(r'(?:^|//|\.)(?:music\.)?youtube\.com|youtu\.be', re.I)
+
+
+def looks_like_address(text):
+    """True for something typed like a web address, with or without
+    https:// (a sentence or a song title with spaces is not one)."""
+    t = text.strip()
+    return bool(t) and ' ' not in t and bool(_ADDRESS.match(t))
+
+
+def full_address(text):
+    t = text.strip()
+    return t if re.match(r'https?://', t, re.I) else 'https://' + t
+
+
+def is_youtube_address(text):
+    return bool(_YT_HOSTS.search(text))
+
+
+def _web_error(e):
+    msg = _clean_error(e)
+    low = msg.lower()
+    if 'impersonat' in low or 'cloudflare' in low or 'http error 403' in low \
+            or 'http error 429' in low or 'http error 503' in low:
+        return ('This site checks that visitors are a normal web browser and '
+                'turns away apps like this one, so the audio cannot be read '
+                "from it. (It needs a browser add-on that this app doesn't "
+                'include.)')
+    if 'Unsupported URL' in msg or 'No video formats' in msg or \
+            'no video' in msg.lower():
+        return ("No audio or video found on that page. It may need a login, "
+                "use copy protection, or build its player in a way this app "
+                "can't read.")
+    return msg
+
+
+def _web_item(info, album, site, number, total, page_url):
+    thumbs = info.get('thumbnails') or []
+    cover = info.get('thumbnail') or (thumbs[-1].get('url') if thumbs else None)
+    url = info.get('webpage_url') or info.get('url') or page_url
+    vid = 'web:' + hashlib.md5(url.encode('utf-8')).hexdigest()[:14]
+    artist = (info.get('artist') or info.get('uploader') or info.get('channel')
+              or site)
+    title = re.sub(r'\s*\(1\)$', '', info.get('title') or url) \
+        if not number else (info.get('title') or url)
+    t = _track(vid, title, artist, album or site, number=number, total=total,
+               cover=cover, duration=info.get('duration'))
+    t['web'] = True
+    t['web_url'] = url
+    return t
+
+
+def _site_name(info, url):
+    """A readable name for where this came from: the site's own name when
+    yt-dlp knows the site, otherwise the web address."""
+    host = re.sub(r'^www\.', '', re.sub(r'^https?://', '', url).split('/')[0])
+    key = info.get('extractor_key') or ''
+    generic = ('Generic', 'HTML5MediaEmbed', 'Embed', 'Html5')
+    if key and not any(g.lower() in key.lower() for g in generic):
+        return re.sub(r'([a-z])([A-Z])', r'\1 \2', key)
+    return host
+
+
+def tracks_from_web(url, log=lambda *a, **k: None):
+    """Songs / clips found at a web address. Returns (items, title).
+    Only audio is ever kept; see download_tracks."""
+    import yt_dlp
+    typed = url.strip()
+    url = full_address(url)
+    opts = {'quiet': True, 'no_warnings': True, 'socket_timeout': 20,
+            'extract_flat': 'in_playlist', 'logger': _QuietLogger(),
+            'noplaylist': False}
+    try:
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except Exception as e:
+            # An address typed without https:// that has no secure version
+            # gets one more try over plain http.
+            if not re.match(r'https?://', typed, re.I) and \
+                    re.search(r'SSL|certificate|Connection refused|'
+                              r'timed out', str(e), re.I):
+                url = 'http://' + typed
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+            else:
+                raise
+    except Exception as e:
+        raise ValueError(_web_error(e))
+    if not info:
+        raise ValueError(_web_error('Unsupported URL'))
+    site = _site_name(info, url)
+    entries = [e for e in (info.get('entries') or []) if e]
+    if len(entries) > 1:
+        album = info.get('title') or site
+        items = [_web_item(e, album, site, n, len(entries), url)
+                 for n, e in enumerate(entries, 1)]
+        for it, e in zip(items, entries):          # entries carry their own page
+            it['web_url'] = e.get('webpage_url') or e.get('url') or url
+        return items, album
+    one = entries[0] if entries else info          # a page with one clip
+    if entries and not one.get('title') and info.get('title'):
+        one = dict(one, title=info['title'])
+    item = _web_item(one, site, site, 0, 0, url)
+    if entries:
+        item['web_url'] = one.get('webpage_url') or one.get('url') or url
+    return [item], item['title']
+
+
+def _has_video(path):
+    """Does this downloaded file carry a picture track? (Probed with the app's
+    own FFmpeg; if that is not possible, judged by the file type.)"""
+    try:
+        import av
+        with av.open(path) as c:
+            return any(getattr(st.codec_context, 'name', '') not in
+                       ('mjpeg', 'png')       # embedded cover pictures
+                       for st in c.streams if st.type == 'video')
+    except Exception:
+        return os.path.splitext(path)[1].lower().lstrip('.') in (
+            'mp4', 'mkv', 'mov', 'avi', 'ts', 'm4v', 'flv', 'wmv')
+
+
+# --------------------------------------------------------------------------
 # Spotify links (read from Spotify's public embed page; no login needed)
 # --------------------------------------------------------------------------
 def _find_images(node, found):
@@ -395,18 +651,144 @@ def _best_image(node):
     return max(found)[1] if found else None
 
 
+SPOTIFY_UA = {'User-Agent': 'Mozilla/5.0'}
+# spotDL's shared public app credentials (the same ones the original project
+# shipped with). Only used to read playlist/album listings, never to log in.
+SPOTIFY_CLIENT = ('5f573c9620494bae87890c0f08a60293',
+                  '212476d9b0f3472eaa762d90b19b0ba8')
+EMBED_LIMIT = 100       # the public embed page never lists more than this
+
+
+def _spotify_tokens(embed_data):
+    """Bearer tokens to try, best first: the one the public embed page itself
+    uses, then a client-credentials token."""
+    import requests
+    try:
+        yield (embed_data['props']['pageProps']['state']['settings']
+               ['session']['accessToken'])
+    except Exception:
+        pass
+    try:
+        r = requests.post('https://accounts.spotify.com/api/token',
+                          data={'grant_type': 'client_credentials'},
+                          auth=SPOTIFY_CLIENT, timeout=20)
+        r.raise_for_status()
+        yield r.json()['access_token']
+    except Exception:
+        pass
+
+
+def _api_get(url, token, params=None, timeout=30, tries=4):
+    import requests
+    for attempt in range(tries):
+        r = requests.get(url, params=params, timeout=timeout,
+                         headers={'Authorization': f'Bearer {token}',
+                                  **SPOTIFY_UA})
+        if r.status_code == 429:               # rate limited: wait, retry
+            time.sleep(min(30, int(r.headers.get('Retry-After', 2)) + 1))
+            continue
+        r.raise_for_status()
+        return r.json()
+    raise RuntimeError('Spotify is rate limiting requests')
+
+
+def _images(images):
+    best = max(images or [], key=lambda i: i.get('width') or 0, default=None)
+    return best['url'] if best else None
+
+
+def _api_row(t, position, album_title='', album_cover_url=None):
+    album = t.get('album') or {}
+    return {
+        'pending': True, 'position': position,
+        'title': t.get('name') or '',
+        'artist': ', '.join(a.get('name', '') for a in t.get('artists') or []),
+        'album': album_title,
+        'duration': (t['duration_ms'] / 1000) if t.get('duration_ms') else None,
+        'cover': album_cover_url or _images(album.get('images')),
+        'year': (album.get('release_date') or '')[:4],
+        'album_artist': ', '.join(a.get('name', '')
+                                  for a in album.get('artists') or []),
+        'track_number': t.get('track_number') if album_title == ''
+        and album.get('name') else None,
+        'track_total': album.get('total_tracks'),
+    }
+
+
+def spotify_api_items(kind, sid, token):
+    """Every track of an album or playlist, 50-100 per request."""
+    base = 'https://api.spotify.com/v1'
+    out = []
+    if kind == 'track':
+        j = _api_get(f'{base}/tracks/{sid}', token)
+        return [_api_row(j, 1)], ''
+    if kind == 'album':
+        j = _api_get(f'{base}/albums/{sid}', token)
+        title, cover = j.get('name') or '', _images(j.get('images'))
+        year = (j.get('release_date') or '')[:4]
+        page = j['tracks']
+        while page:
+            for t in page.get('items') or []:
+                row = _api_row(t, len(out) + 1, title, cover)
+                row['year'] = year
+                row['album_artist'] = ', '.join(
+                    a.get('name', '') for a in j.get('artists') or [])
+                row['track_number'] = t.get('track_number') or row['position']
+                row['track_total'] = j.get('total_tracks') or None
+                out.append(row)
+            page = (_api_get(page['next'], token) if page.get('next') else None)
+        return out, title
+    # playlist
+    title = _api_get(f'{base}/playlists/{sid}', token,
+                     {'fields': 'name'}).get('name') or ''
+    fields = ('items(track(name,duration_ms,artists(name),'
+              'album(name,images,release_date))),next,total')
+    page, position = None, 0
+    for endpoint in ('tracks', 'items'):
+        try:
+            page = _api_get(f'{base}/playlists/{sid}/{endpoint}', token,
+                            {'limit': 100, 'fields': fields})
+            break
+        except Exception:
+            continue
+    while page:
+        for entry in page.get('items') or []:
+            position += 1
+            t = entry.get('track') or entry.get('item')
+            if t and t.get('name'):
+                out.append(_api_row(t, position))
+        page = (_api_get(page['next'], token) if page.get('next') else None)
+    return out, title
+
+
+def spotify_artist_name(url):
+    """Name of the artist on a Spotify artist link (from the public embed page)."""
+    import requests
+    m = _SPOTIFY.search(url)
+    r = requests.get(f'https://open.spotify.com/embed/artist/{m.group(2)}',
+                     headers=SPOTIFY_UA, timeout=20)
+    r.raise_for_status()
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', r.text, re.S)
+    entity = {}
+    if m:
+        entity = (json.loads(m.group(1)).get('props', {}).get('pageProps', {})
+                  .get('state', {}).get('data', {}).get('entity', {}))
+    name = entity.get('name') or entity.get('title') or ''
+    if not name:
+        t = re.search(r'<title>([^<]+)</title>', r.text)
+        name = re.sub(r'(?i)\s*[-|].*$', '', t.group(1)).strip() if t else ''
+    return name
+
+
 def spotify_items(url, log):
+    """Songs of a Spotify track/album/playlist link. Returns (items, title)."""
     import requests
     m = _SPOTIFY.search(url)
     if not m:
         return [], ''
     kind, sid = m.groups()
-    if kind == 'artist':
-        raise ValueError('Spotify artist links are not supported. Paste an '
-                         'album, playlist or track link, or type the artist '
-                         'name instead.')
     r = requests.get(f'https://open.spotify.com/embed/{kind}/{sid}',
-                     headers={'User-Agent': 'Mozilla/5.0'}, timeout=20)
+                     headers=SPOTIFY_UA, timeout=20)
     r.raise_for_status()
     m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', r.text, re.S)
     if not m:
@@ -420,48 +802,43 @@ def spotify_items(url, log):
     shared_cover = _best_image(entity) if kind in ('album', 'track') else None
     rows = [entity] if kind == 'track' else (entity.get('trackList') or [])
     out = []
-    for row in rows:
+    for position, row in enumerate(rows, 1):
         name = row.get('title') or row.get('name')
         artist = row.get('subtitle') or ', '.join(
             a.get('name', '') for a in row.get('artists', []) or [])
         ms = row.get('duration')
         if name:
             out.append({
-                'title': name, 'artist': artist,
+                'pending': True, 'position': position, 'title': name,
+                'artist': artist,
                 'album': title if kind == 'album' else '',
                 'duration': ms / 1000 if isinstance(ms, (int, float)) else None,
                 'cover': (_best_image(row) if kind == 'playlist' else None)
                 or shared_cover,
             })
+
+    # The embed page stops at 100 songs. Ask Spotify's API for the whole list.
+    if kind in ('album', 'playlist') and len(out) >= EMBED_LIMIT:
+        full = None
+        for token in _spotify_tokens(data):
+            try:
+                items, api_title = spotify_api_items(kind, sid, token)
+            except Exception as e:
+                log(f'  Spotify listing attempt failed: {_clean_error(e)}',
+                    'info')
+                continue
+            if len(items) >= len(out):
+                full, title = items, api_title or title
+                break
+        if full:
+            out = full
+            log(f'Read all {len(out)} songs from Spotify', 'success')
+        else:
+            log(f'Spotify only showed the first {len(out)} songs of this '
+                f'{kind} and would not list the rest. Only those '
+                f'{len(out)} will be downloaded.', 'warning')
     log(f"Spotify {kind}: {title or sid} ({len(out)} tracks)", 'info')
     return out, (title if kind != 'track' else '')
-
-
-def match_spotify_items(yt, items, ui):
-    """Match Spotify tracks to YouTube Music songs. Returns (tracks, missing)."""
-    tracks, missing = [], []
-    for i, it in enumerate(items, 1):
-        _check_cancel(ui)
-        ui.set_status(f'Matching tracks {i}/{len(items)}: {it["title"]}')
-        try:
-            r, off = find_song(yt, it['title'], it['artist'],
-                               it.get('duration'), require_title=False)
-        except Exception as e:
-            missing.append({**it, 'reason': f'search failed: {_clean_error(e)}'})
-            continue
-        if not r:
-            missing.append({**it, 'reason':
-                            'no matching song on YouTube Music'})
-            ui.log(f"  ! not on YouTube Music: {it['title']}", 'warning')
-            continue
-        if off is not None and off > DURATION_TOLERANCE:
-            ui.log(f"  ! closest version of {it['title']} is {off:.0f}s off",
-                   'warning')
-        tracks.append(_song_to_track(
-            yt, r, {'title': it['title'], 'artist': it['artist'],
-                    'album': it['album']},
-            cover=it.get('cover'), duration=it.get('duration')))
-    return tracks, missing
 
 
 # --------------------------------------------------------------------------
@@ -653,142 +1030,492 @@ def to_mp3(src, dst, bitrate=MP3_BITRATE, use_filters=True):
 # --------------------------------------------------------------------------
 # Downloading
 # --------------------------------------------------------------------------
-def download_tracks(tracks, missing, output_path, audio_format, ui):
-    """Download every track. Returns a list of result dicts for the report."""
+class Registry:
+    """Remembers finished songs (one line per song in a hidden file) so a
+    repeated or resumed job skips them instantly instead of searching again."""
+
+    def __init__(self, output_path):
+        self.path = os.path.join(output_path, '.spotdl_done.txt')
+        self._lock = threading.Lock()
+        self.done = {}
+        try:
+            with open(self.path, encoding='utf-8') as f:
+                for line in f:
+                    key, _, where = line.rstrip('\n').partition('\t')
+                    if where:
+                        self.done[key] = where
+        except OSError:
+            pass
+
+    def get(self, key):
+        where = self.done.get(key)
+        return where if where and os.path.exists(where) else None
+
+    def add(self, key, where):
+        with self._lock:
+            self.done[key] = where
+            try:
+                with open(self.path, 'a', encoding='utf-8') as f:
+                    f.write(f'{key}\t{where}\n')
+            except OSError:
+                pass
+
+
+def _item_key(item, ext):
+    if item.get('pending'):
+        return f"{ext}|sp|{_norm(item['title'])}|{_norm(item['artist'])}"
+    return f"{ext}|yt|{item.get('video_id')}"
+
+
+def stream_url(video_id):
+    """Direct address of the audio-only stream of a YouTube Music song, for
+    previewing. Returns (url, headers, info). Nothing is downloaded."""
+    import yt_dlp
+    last = None
+    for plan in ATTEMPT_PLANS:
+        opts = {'format': 'bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio',
+                'quiet': True, 'no_warnings': True, 'noplaylist': True,
+                'logger': _QuietLogger()}
+        if plan:
+            opts['extractor_args'] = {'youtube': {'player_client': plan}}
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(
+                    f'https://music.youtube.com/watch?v={video_id}',
+                    download=False)
+            if info.get('vcodec') not in (None, 'none'):
+                raise RuntimeError('only a video stream was offered')
+            return info['url'], dict(info.get('http_headers') or {}), info
+        except Exception as e:
+            last = e
+    raise RuntimeError(_clean_error(last))
+
+
+def resolve_item(yt, item, ui, total):
+    """Turn one queue entry into a YouTube Music audio track.
+
+    Returns (track, None), or (None, reason) when it cannot be downloaded.
+    """
+    if item.get('web'):                      # from a website: nothing to match
+        return item, None
+    if item.get('pending'):                  # a Spotify entry: find it first
+        try:
+            r, off = find_song(yt, item['title'], item['artist'],
+                               item.get('duration'), require_title=False)
+        except Exception as e:
+            return None, f'search failed: {_clean_error(e)}'
+        if not r:
+            return None, 'no matching song on YouTube Music'
+        if off is not None and off > DURATION_TOLERANCE:
+            ui.log(f"  ! closest version is {off:.0f}s off", 'warning')
+        track = _song_to_track(
+            yt, r, {'title': item['title'], 'artist': item['artist'],
+                    'album': item.get('album', '')},
+            cover=item.get('cover'), duration=item.get('duration'))
+        track['position'] = item.get('position')
+        track['year'] = item.get('year') or track['year']
+        if item.get('album'):               # keep the album it came from
+            track['album'] = item['album']
+        if item.get('album_artist'):
+            track['album_artist'] = item['album_artist']
+        if item.get('track_number'):        # exact numbers from Spotify
+            track['track_number'] = item['track_number']
+            track['track_total'] = item.get('track_total') or 0
+        elif item.get('album') and item.get('position'):
+            track['track_number'] = item['position']     # an album link
+            track['track_total'] = total
+        return track, None
+    if item.get('video_type') not in (None, AUDIO_TRACK):
+        fixed = to_audio_track(yt, item)
+        if not fixed:
+            return None, 'only a video exists, no YouTube Music audio version'
+        return fixed, None
+    return item, None
+
+
+def _embedded_cover(path):
+    """True if the file already carries a cover picture (used by upgrade
+    mode). Unknown files count as having one, so they are not redone."""
+    try:
+        import mutagen
+        mf = mutagen.File(path)
+        tags = getattr(mf, 'tags', None)
+        if tags is None:
+            return False
+        if hasattr(tags, 'getall'):
+            return bool(tags.getall('APIC'))
+        if 'covr' in tags:
+            return bool(tags['covr'])
+    except Exception:
+        return True
+    return True
+
+
+def needs_upgrade(path, ext):
+    """Upgrade mode: a song already on disk that is worth downloading again -
+    saved in another format than the one chosen now, or missing its cover."""
+    if not path or not os.path.exists(path):
+        return False
+    have = os.path.splitext(path)[1].lstrip('.').lower()
+    want = 'webm' if ext == 'webm' else ext
+    if have and have != want:
+        return True
+    return ext in ('mp3', 'm4a') and not _embedded_cover(path)
+
+
+def download_tracks(items, yt, output_path, audio_format, ui, workers=1,
+                    mode='fill', upgrade=False):
+    """Download the songs, `workers` at a time (matching each Spotify song only
+    when its turn comes). Returns result dicts for the report, in order; each
+    carries `retry` - what to feed back in to try that song again.
+
+    mode 'fill' skips songs already downloaded; 'redo' downloads every song
+    again, replacing the old file only once the new one is complete. With
+    `upgrade`, fill mode also redoes songs saved in another format or without
+    cover art."""
+    import threading
     import yt_dlp
     selector, ext = FORMATS.get(audio_format, FORMATS['m4a'])
-    total = len(tracks)
-    ui.set_queue(tracks)
+    total = len(items)
+    workers = max(1, min(5, int(workers or 1)))
+    ui.set_queue(items)
     ui.set_overall(0, total)
     covers = {}
-    results = []
+    results = [None] * total
+    claimed = set()
+    registry = Registry(output_path)
+    lock = threading.Lock()            # guards covers, claimed, counters
+    state = {'finished': 0, 'next': 0, 'cancelled': False}
+    progress = {}                      # index -> 0..1 of the songs in flight
 
-    for i, t in enumerate(tracks):
+    def push_progress():
+        with lock:
+            vals = list(progress.values())
+        ui.set_progress(sum(vals) / len(vals) if vals else 0)
+
+    def finish(i, result):
+        with lock:
+            results[i] = result
+            state['finished'] += 1
+            n = state['finished']
+            progress.pop(i, None)
+        ui.set_overall(n, total)
+
+    def work(i, item, yt):
         _check_cancel(ui)
         n = i + 1
-        label = f"{t['artist']} - {t['title']}"
+        item_label = f"{item['artist']} - {item['title']}"
         ui.set_track_state(i, 'active', '')
+        redo = mode == 'redo'
+
+        # Already downloaded earlier (this job or a previous one)?
+        known = None if redo else registry.get(_item_key(item, ext))
+        if known and upgrade and not item.get('web') and \
+                needs_upgrade(known, ext):
+            known = None
+        if known:
+            ui.set_track_state(i, 'skipped', 'already downloaded', path=known)
+            return finish(i, {'track': item, 'status': 'skipped',
+                              'retry': None, 'note': 'already in the folder'})
+
+        ui.set_status(f'Finding {n}/{total}: {item_label}')
+        t, why = resolve_item(yt, item, ui, total)
+        if t is None:
+            ui.set_track_state(i, 'failed', why)
+            ui.log(f'[{n}/{total}] {item_label}\n  x {why}', 'error')
+            return finish(i, {'track': item, 'status': 'failed',
+                              'retry': item, 'note': why})
+        known = None if redo else registry.get(_item_key(t, ext))
+        if known and upgrade and not item.get('web') and \
+                needs_upgrade(known, ext):
+            known = None
+        if known:
+            registry.add(_item_key(item, ext), known)
+            ui.set_track_state(i, 'skipped', 'already downloaded', path=known)
+            return finish(i, {'track': t, 'status': 'skipped', 'retry': None,
+                              'note': 'already in the folder'})
+
+        label = f"{t['artist']} - {t['title']}"
         ui.set_status(f'Downloading {n}/{total}: {label}')
-        ui.set_progress(0)
         ui.log(f'[{n}/{total}] {label}', 'info')
 
         key = t.get('cover') or t['video_id']
-        if key not in covers:
+        with lock:
+            have_cover = key in covers
+        if not have_cover:
             found = get_cover(t)
-            if found and min(found[2]) >= 300:
+            with lock:
                 covers[key] = found
-            else:
-                if found:
-                    ui.log(f'  ! only a small cover found {found[2][0]}x'
-                           f'{found[2][1]}', 'warning')
-                else:
-                    ui.log('  ! no cover art could be downloaded', 'warning')
-                covers[key] = None if not found else found
-                if not found:
-                    pass
-        found = covers[key]
+            if found and min(found[2]) < 300:
+                ui.log(f'  ! only a small cover found {found[2][0]}x'
+                       f'{found[2][1]}', 'warning')
+            elif not found:
+                ui.log('  ! no cover art could be downloaded', 'warning')
+        with lock:
+            found = covers[key]
+            new_cover = bool(found) and found[1] != getattr(ui, '_last_cover',
+                                                            None)
+            if new_cover:
+                ui._last_cover = found[1]
         cover = found[0] if found else None
-        if found and found[1] != getattr(ui, '_last_cover', None):
+        if new_cover:
             ui.log(f'  cover art {found[2][0]}x{found[2][1]}', 'info')
-            ui._last_cover = found[1]
         ui.set_now(t, cover)
 
         folder = os.path.join(output_path, safe_name(t['album_artist']),
                               safe_name(t['album']))
-        prefix = f"{int(t['track_number']):02d} - " if t['track_number'] else ''
-        base = f"{prefix}{safe_name(t['title'])}"
+        # File names carry no track number: the order lives in the file's own
+        # tags, so renaming a file never loses its place in the album.
+        base = safe_name(t['title'])
         final = os.path.join(folder, f'{base}.{ext}')
-        if os.path.exists(final):
-            results.append({'track': t, 'status': 'skipped',
-                            'note': 'already in the folder'})
-            ui.set_track_state(i, 'skipped', 'already downloaded')
-            ui.log('  = already downloaded', 'info')
-            ui.set_overall(n, total)
-            continue
-        os.makedirs(folder, exist_ok=True)
+        # Songs saved by earlier versions were named "01 - Title"; count them.
+        legacy = (os.path.join(folder, f"{int(t['track_number']):02d} - "
+                                       f"{base}.{ext}")
+                  if t['track_number'] else None)
+        with lock:
+            if final in claimed:           # two songs with the same title
+                base = f"{base} ({t['track_number'] or n})"
+                final = os.path.join(folder, f'{base}.{ext}')
+            claimed.add(final)
+        on_disk = os.path.exists(final) or bool(legacy and
+                                                os.path.exists(legacy))
+        if on_disk and not redo:
+            where = final if os.path.exists(final) else legacy
+            if not (upgrade and not t.get('web') and
+                    needs_upgrade(where, ext)):
+                for k in (_item_key(item, ext), _item_key(t, ext)):
+                    registry.add(k, where)
+                ui.set_track_state(i, 'skipped', 'already downloaded',
+                                   path=where)
+                ui.log('  = already downloaded', 'info')
+                return finish(i, {'track': t, 'status': 'skipped',
+                                  'retry': None,
+                                  'note': 'already in the folder'})
+        # A redo (or upgrade) is built in a side folder and swapped in at the
+        # end, so a failed attempt never destroys the song you already have.
+        side = on_disk
+        work_dir = os.path.join(folder, f'.redo{i}') if side else folder
+        os.makedirs(work_dir, exist_ok=True)
+        work_final = os.path.join(work_dir, f'{base}.{ext}')
 
         def hook(d):
             _check_cancel(ui)
             if d.get('status') == 'downloading':
                 size = d.get('total_bytes') or d.get('total_bytes_estimate')
                 if size:
-                    ui.set_progress(d.get('downloaded_bytes', 0) / size)
+                    with lock:
+                        progress[i] = d.get('downloaded_bytes', 0) / size
+                    push_progress()
             elif d.get('status') == 'finished':
-                ui.set_progress(1)
+                with lock:
+                    progress[i] = 1
+                push_progress()
 
-        opts = {
-            'format': selector,
-            'outtmpl': os.path.join(folder, base + '.%(ext)s'),
-            'quiet': True, 'no_warnings': True, 'noprogress': True,
-            'noplaylist': True, 'retries': 3,
-            'logger': _QuietLogger(), 'progress_hooks': [hook],
-        }
-        try:
+        def fetch(plan):
+            """One download attempt. `plan` picks the YouTube player route."""
+            is_web = bool(t.get('web'))
+            opts = {
+                'format': 'bestaudio/best' if is_web else selector,
+                'outtmpl': os.path.join(work_dir, base + '.%(ext)s'),
+                'quiet': True, 'no_warnings': True, 'noprogress': True,
+                'noplaylist': True, 'retries': 3,
+                'logger': _QuietLogger(), 'progress_hooks': [hook],
+            }
+            if plan and not is_web:
+                opts['extractor_args'] = {'youtube': {'player_client': plan}}
             with yt_dlp.YoutubeDL(opts) as ydl:
                 # YouTube Music address of the audio track; audio-only format.
                 info = ydl.extract_info(
+                    t['web_url'] if is_web else
                     f"https://music.youtube.com/watch?v={t['video_id']}",
                     download=True)
-                saved = ydl.prepare_filename(info)
+                return info, ydl.prepare_filename(info)
+
+        try:
+            info = saved = None
+            attempts = 0
+            for attempt, plan in enumerate(ATTEMPT_PLANS, 1):
+                attempts = attempt
+                try:
+                    info, saved = fetch(plan)
+                    break
+                except Cancelled:
+                    raise
+                except Exception as e:
+                    reason = _clean_error(e)
+                    if attempt == len(ATTEMPT_PLANS):
+                        raise RuntimeError(
+                            f'{reason} (failed after {attempt} attempts)')
+                    ui.log(f'  ! attempt {attempt} of {len(ATTEMPT_PLANS)} '
+                           f'failed: {reason} - retrying', 'warning')
+                    ui.set_track_state(
+                        i, 'active', f'retry {attempt + 1} of '
+                        f'{len(ATTEMPT_PLANS)}: {reason}')
+                    with lock:
+                        progress[i] = 0
+                    push_progress()
+                    # Leftover partial files belong to the old download link.
+                    for old in glob.glob(
+                            os.path.join(glob.escape(work_dir),
+                                         glob.escape(base) + '.*')):
+                        if old != work_final:
+                            try:
+                                os.remove(old)
+                            except OSError:
+                                pass
+                    for _ in range(attempt * 4):      # wait 4s, then 8s
+                        _check_cancel(ui)
+                        time.sleep(0.5)
             note = ''
+            if attempts > 1:
+                note = f'succeeded on attempt {attempts}'
             got = info.get('duration')
             # A second or two either way is normal (Spotify and YouTube trim
             # silence differently) and is not worth mentioning.
-            if t.get('duration') and got and abs(got - t['duration']) > 5:
-                note = (f"length {got:.0f}s vs expected "
-                        f"{t['duration']:.0f}s (different version)")
+            if not t.get('web') and t.get('duration') and got and \
+                    abs(got - t['duration']) > 5:
+                note = (note + '; ' if note else '') + (
+                    f"length {got:.0f}s vs expected "
+                    f"{t['duration']:.0f}s (different version)")
                 ui.log(f'  ! {note}', 'warning')
-            if ext == 'mp3':
-                ui.set_status(f'Converting {n}/{total} to MP3: {label}')
-                to_mp3(saved, final)
-                os.remove(saved)
+            out = work_final
+            # A page's file may carry a picture track too. Only the sound is
+            # kept: such a file is always converted to MP3 (which drops it).
+            has_video = bool(t.get('web')) and (
+                info.get('vcodec') not in (None, 'none')
+                or _has_video(saved))
+            if ext == 'mp3' or has_video:
+                out = os.path.join(work_dir, f'{base}.mp3')
+                if saved.lower().endswith('.mp3') and not has_video:
+                    out = saved
+                else:
+                    ui.set_status(f'Converting {n}/{total} to MP3: {label}')
+                    to_mp3(saved, out)
+                    if os.path.abspath(saved) != os.path.abspath(out):
+                        os.remove(saved)
+                if has_video and ext != 'mp3':
+                    note = (note + '; ' if note else '') + \
+                        'page had video; its audio was saved as MP3'
             elif os.path.exists(saved):
-                final = saved
+                out = saved
             if cover:
                 # Also leave the cover as a picture in the album folder, so
                 # players show it even for formats that cannot embed art.
                 ext_img = 'png' if _is_png(cover) else 'jpg'
-                side = os.path.join(folder, f'cover.{ext_img}')
-                if not os.path.exists(side):
-                    with open(side, 'wb') as fh:
+                pic = os.path.join(folder, f'cover.{ext_img}')
+                if not os.path.exists(pic):
+                    with open(pic, 'wb') as fh:
                         fh.write(cover)
             try:
-                tag_file(final, t, cover)
+                tag_file(out, t, cover)
             except Exception as e:
                 note = (note + '; ' if note else '') + f'tagging failed: {e}'
                 ui.log(f'  ! tagging failed: {e}', 'warning')
-            results.append({'track': t, 'status': 'done', 'note': note,
-                            'path': final})
-            ui.set_track_state(i, 'done', '')
+            if redo and item.get('replace_path') and os.path.splitext(
+                    item['replace_path'])[1] == os.path.splitext(out)[1]:
+                # a repair: put the new copy exactly where the broken one was
+                target = item['replace_path']
+                os.replace(out, target)
+                if side:
+                    shutil.rmtree(work_dir, ignore_errors=True)
+                out = target
+            elif side:                 # swap the finished song in
+                target = os.path.join(folder, os.path.basename(out))
+                os.replace(out, target)
+                shutil.rmtree(work_dir, ignore_errors=True)
+                out = target
+            for k in (_item_key(item, ext), _item_key(t, ext)):
+                registry.add(k, out)
+            ui.set_track_state(i, 'done', '', path=out)
             ui.log('  + saved', 'success')
+            return finish(i, {'track': t, 'status': 'done', 'note': note,
+                              'path': out, 'retry': None})
         except Cancelled:
             ui.set_track_state(i, 'pending', '')
+            if side:
+                shutil.rmtree(work_dir, ignore_errors=True)
             raise
         except Exception as e:
             reason = _clean_error(e)
-            results.append({'track': t, 'status': 'failed', 'note': reason})
+            if side:
+                shutil.rmtree(work_dir, ignore_errors=True)
             ui.set_track_state(i, 'failed', reason)
             ui.log(f'  x {reason}', 'error')
-        ui.set_overall(n, total)
+            # Retry from the resolved song, so it is not searched for again.
+            return finish(i, {'track': t, 'status': 'failed', 'note': reason,
+                              'retry': t})
 
+    def worker():
+        try:
+            from ytmusicapi import YTMusic
+            my_yt = YTMusic() if workers > 1 else yt
+        except Exception:
+            my_yt = yt
+        while not state['cancelled']:
+            with lock:
+                i = state['next']
+                if i >= total:
+                    return
+                state['next'] += 1
+            try:
+                work(i, items[i], my_yt)
+            except Cancelled:
+                state['cancelled'] = True
+                return
+            except Exception as e:                  # never lose the others
+                ui.log(f'  x unexpected error: {_clean_error(e)}', 'error')
+                finish(i, {'track': items[i], 'status': 'failed',
+                           'retry': items[i], 'note': _clean_error(e)})
+
+    if workers == 1:
+        worker()
+    else:
+        threads = [threading.Thread(target=worker, daemon=True)
+                   for _ in range(min(workers, total))]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
     ui.set_now(None, None)
-    return results
+    if state['cancelled']:
+        raise Cancelled()
+    return [r for r in results if r is not None]
 
 
-def make_report(title, link, audio_format, results, missing, output_path,
-                cover_bytes, ui):
+def make_report(title, link, audio_format, results, output_path,
+                cover_bytes):
     from report import build_report
     stamp = time.strftime('%Y-%m-%d %H%M')
     folder = os.path.join(output_path, 'Reports')
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, f'{safe_name(title)} - {stamp}.pdf')
-    build_report(path, title, link, audio_format, results, missing,
-                 cover_bytes)
+    build_report(path, title, link, audio_format, results, [], cover_bytes)
     return path
 
 
-def download(link, output_path, audio_format, ui):
-    """Entry point. `link` is a URL, or an artist name."""
+def _save_failed(ui, title, link, results):
+    """Write the songs that failed so the app can offer to retry them."""
+    path = getattr(ui, 'failed_path', None)
+    if not path:
+        return
+    items = [r['retry'] for r in results if r['status'] == 'failed']
+    try:
+        if items:
+            with open(path, 'w') as f:
+                json.dump({'title': title, 'link': link, 'items': items}, f)
+        elif os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
+def download(link, output_path, audio_format, ui, retry_path=None,
+             picked=None, picked_title='', workers=1, mode='fill',
+             upgrade=False):
+    """Entry point. `link` is a URL or an artist name. With `retry_path`, only
+    the songs saved there by an earlier job (the failed ones) are attempted.
+    With `picked`, exactly those songs (chosen on the search screen) are
+    downloaded."""
     log = ui.log
     try:
         _setup_certs()
@@ -803,65 +1530,75 @@ def download(link, output_path, audio_format, ui):
         yt = YTMusic()
         os.makedirs(output_path, exist_ok=True)
         link = link.strip()
-        missing, title = [], ''
+        title = ''
 
-        if _SPOTIFY.search(link):
+        if retry_path:
+            with open(retry_path) as f:
+                saved = json.load(f)
+            items, title, link = saved['items'], saved.get('title', ''), \
+                saved.get('link', '')
+            log(f'Retrying {len(items)} song(s) that failed before.', 'info')
+        elif picked:
+            items, title = picked, picked_title
+            link = picked_title or 'Selected songs'
+        elif _SPOTIFY.search(link) and _SPOTIFY.search(link).group(1) == 'artist':
+            ui.set_status('Reading Spotify artist...')
+            name = spotify_artist_name(link)
+            if not name:
+                raise ValueError("Couldn't read the artist name from this "
+                                 'Spotify link. Type the artist name instead.')
+            log(f'Spotify artist: {name}. Using their albums and singles on '
+                'YouTube Music.', 'info')
+            items, title = tracks_from_artist_name(yt, name, log)
+        elif _SPOTIFY.search(link):
             ui.set_status('Reading Spotify link...')
             items, title = spotify_items(link, log)
-            if not items:
-                log('No tracks found at that Spotify link.', 'error')
-                ui.set_status('No tracks found')
-                return
-            tracks, missing = match_spotify_items(yt, items, ui)
-        elif re.match(r'https?://', link):
+        elif (re.match(r'https?://', link) or looks_like_address(link)) \
+                and not is_youtube_address(link):
+            ui.set_status('Reading the web page...')
+            items, title = tracks_from_web(link, log)
+            log(f'Web page: {title}. Only the audio is saved.', 'info')
+        elif re.match(r'https?://', link) or is_youtube_address(link):
             ui.set_status('Reading link...')
-            tracks, title = tracks_from_youtube_url(yt, link, log)
+            items, title = tracks_from_youtube_url(
+                yt, full_address(link), log)
         else:
             ui.set_status(f"Searching for artist '{link}'...")
-            tracks, title = tracks_from_artist_name(yt, link, log)
+            items, title = tracks_from_artist_name(yt, link, log)
 
-        # Never download a music video / ordinary upload: convert to the
-        # YouTube Music audio version or report it as unavailable.
-        keep = []
-        for t in tracks:
-            fixed = to_audio_track(yt, t) if t.get('video_type') not in \
-                (None, AUDIO_TRACK) else t
-            if fixed:
-                keep.append(fixed)
-            else:
-                missing.append({'title': t['title'], 'artist': t['artist'],
-                                'reason': 'only a video exists, no YouTube '
-                                          'Music audio version'})
-        tracks = keep
-
-        if not tracks and not missing:
+        if not items:
             log('Nothing to download for that link.', 'error')
             ui.set_status('Nothing found')
             return
-        log(f'Found {len(tracks)} song(s)'
-            + (f', {len(missing)} not available' if missing else '') + '.',
-            'success')
+        log(f'Found {len(items)} song(s).', 'success')
+        getattr(ui, 'set_job_title', lambda t: None)(title)
 
-        results = download_tracks(tracks, missing, output_path,
-                                  audio_format, ui) if tracks else []
+        if mode == 'redo':
+            log('Downloading everything again; your current files are only '
+                'replaced when the new copy is complete.', 'info')
+        results = download_tracks(items, yt, output_path, audio_format, ui,
+                                  workers=workers, mode=mode, upgrade=upgrade)
 
         done = sum(r['status'] == 'done' for r in results)
         skipped = sum(r['status'] == 'skipped' for r in results)
-        failed = sum(r['status'] == 'failed' for r in results) + len(missing)
+        failed = sum(r['status'] == 'failed' for r in results)
+        _save_failed(ui, title, link, results)
         ui.set_status(f'Finished: {done} downloaded, {skipped} already had, '
                       f'{failed} failed')
         log(f'Complete: {done} downloaded, {skipped} already had, '
             f'{failed} failed.', 'success' if not failed else 'warning')
 
-        if len(tracks) + len(missing) > 1:
+        if len(items) > 1:
             if not title:
-                artists = {t['album_artist'] for t in tracks}
+                artists = {r['track'].get('album_artist') for r in results}
+                artists.discard(None)
                 title = artists.pop() if len(artists) == 1 else 'Download'
-            first = get_cover(tracks[0]) if tracks else None
-            first_cover = first[0] if first else None
+            first = next((get_cover(r['track']) for r in results
+                          if r['track'].get('video_id')), None)
             try:
-                path = make_report(title, link, audio_format, results, missing,
-                                   output_path, first_cover, ui)
+                path = make_report(title + (' (retry)' if retry_path else ''),
+                                   link, audio_format, results, output_path,
+                                   first[0] if first else None)
                 log(f'Report saved: {path}', 'info')
                 ui.set_report(path)
             except Exception as e:
