@@ -46,8 +46,14 @@ saves it. Only the sound is kept: if the page only has video, its audio is saved
 as an MP3. Titles and pictures come from the page, not YouTube Music.
 
 It cannot get audio from copy-protected services (Spotify, Apple Music, Netflix,
-Tidal), from pages that need a login, or from players it cannot read; the card
-says so instead of failing silently.
+Tidal), from pages that need a login, from sites that only serve real web
+browsers (the card says so), or from players it cannot read.
+
+## Share from other apps
+
+SpotDL appears in the Android **Share** menu. In your browser, YouTube, Spotify
+or any app that can share a link, press Share and pick SpotDL: the link is put in
+the search box and looked up. (If the app is already open it is reused.)
 
 ## Faster downloads
 

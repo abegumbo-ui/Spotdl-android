@@ -527,6 +527,13 @@ def is_youtube_address(text):
 
 def _web_error(e):
     msg = _clean_error(e)
+    low = msg.lower()
+    if 'impersonat' in low or 'cloudflare' in low or 'http error 403' in low \
+            or 'http error 429' in low or 'http error 503' in low:
+        return ('This site checks that visitors are a normal web browser and '
+                'turns away apps like this one, so the audio cannot be read '
+                "from it. (It needs a browser add-on that this app doesn't "
+                'include.)')
     if 'Unsupported URL' in msg or 'No video formats' in msg or \
             'no video' in msg.lower():
         return ("No audio or video found on that page. It may need a login, "

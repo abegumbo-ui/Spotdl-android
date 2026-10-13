@@ -32,6 +32,7 @@ release on, updates install over the top.
   - Up to 5 songs download at the same time (Settings)
   - Settings screen; yt-dlp updates are checked at most once a day, or on demand
   - Type or paste any web address: the audio is found on the page and saved
+  - SpotDL appears in the Android Share menu
   - Past downloads with Fill gaps / Redo all, a safe redo, and a broken-song scan
 
 For 64-bit Android phones (Android 7.0 and newer).

@@ -22,6 +22,9 @@ orientation = portrait
 fullscreen = 0
 
 android.permissions = INTERNET, WRITE_EXTERNAL_STORAGE, READ_EXTERNAL_STORAGE, READ_MEDIA_AUDIO, MANAGE_EXTERNAL_STORAGE, FOREGROUND_SERVICE, POST_NOTIFICATIONS, WAKE_LOCK, ACCESS_WIFI_STATE
+# Show up in other apps' Share menu (text/links), and reuse the running app
+android.manifest.intent_filters = intent_filters.xml
+android.manifest.launch_mode = singleTask
 android.api = 33
 android.minapi = 24
 android.ndk = 25b

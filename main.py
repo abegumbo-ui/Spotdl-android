@@ -748,7 +748,45 @@ class SpotDLApp(App):
         # or once All files access has been granted).
         Clock.schedule_once(lambda dt: self.layout.prepare_folder(), 0)
         Window.bind(on_keyboard=self._on_key)
+        if platform == 'android':
+            try:                  # links shared from other apps
+                from android import activity
+                activity.bind(on_new_intent=self._on_new_intent)
+            except Exception:
+                pass
+            Clock.schedule_once(lambda dt: self._check_shared(), 1.0)
         return self.layout
+
+    def _on_new_intent(self, intent):
+        Clock.schedule_once(lambda dt: self._check_shared(intent), 0.2)
+
+    def _check_shared(self, intent=None):
+        """Pick up text shared to us (Share menu) and search for it."""
+        try:
+            from jnius import autoclass
+            if intent is None:
+                intent = autoclass('org.kivy.android.PythonActivity') \
+                    .mActivity.getIntent()
+            if intent is None or intent.getAction() != \
+                    'android.intent.action.SEND':
+                return
+            text = intent.getStringExtra('android.intent.extra.TEXT')
+            intent.setAction('')            # handle each share once
+        except Exception:
+            return
+        self.handle_shared(text)
+
+    def handle_shared(self, text):
+        import search as srch
+        link = srch.extract_shared_link(text)
+        if not link:
+            return
+        self.layout.link_input.text = link
+        if self.layout.running:
+            self.layout.set_status('A download is running. The shared link '
+                                   'is in the search box.')
+        else:
+            self.layout.on_go()
 
     def _on_key(self, window, key, *args):
         """Android back button: close the top screen first."""

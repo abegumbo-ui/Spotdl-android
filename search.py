@@ -689,3 +689,14 @@ def artist_page(searcher, source, artist_id, name=''):
         it['duration_text'] = _fmt(it.get('duration'))
     page['albums'] = searcher.artist_albums(source, artist_id, page['name'])
     return page
+
+
+def extract_shared_link(text):
+    """What to put in the search bar when another app shares `text` with us:
+    the first web address in it (shared text is often "Title https://..."),
+    otherwise the text itself."""
+    text = (text or '').strip()
+    m = re.search(r"https?://[^\s<>\"']+", text)
+    if m:
+        return m.group(0).rstrip('.,;)')
+    return text
